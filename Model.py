@@ -329,7 +329,7 @@ class ContrastiveFlowMatching(nn.Module):
 		usr_model_embeds = torch.mm(x_target_pred, model_feats)
 		usr_id_embeds = torch.mm(x_target, itmEmbeds)
 		gc_loss = self.graph_consistency_loss(usr_model_embeds, usr_id_embeds)
-		cfm_loss = self.semantic_flow_loss(x_target_pred, x_target)
+		cfm_loss = self.contrastive_flow_loss(pred_velocity, target_velocity)
 
 		return fm_loss, gc_loss, cfm_loss
 
@@ -346,17 +346,23 @@ class ContrastiveFlowMatching(nn.Module):
 		return x_t
 
 	def graph_consistency_loss(self, pred_embeds, target_embeds):
-		return 1 - F.cosine_similarity(pred_embeds, target_embeds, dim=1)
+		return self.mean_flat((pred_embeds - target_embeds) ** 2)
 
-	def semantic_flow_loss(self, pred_target, target):
-		if pred_target.size(0) <= 1:
-			return pred_target.new_tensor(0.0)
+	def contrastive_flow_loss(self, pred_velocity, target_velocity):
+		if pred_velocity.size(0) <= 1:
+			return pred_velocity.new_tensor(0.0)
 
-		pred_target = F.normalize(pred_target, p=2, dim=1)
-		target = F.normalize(target, p=2, dim=1)
-		logits = torch.mm(pred_target, target.t()) / self.temp
-		labels = torch.arange(pred_target.size(0), device=pred_target.device)
-		return 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.t(), labels))
+		batch_size = pred_velocity.size(0)
+		indices = torch.arange(batch_size, device=pred_velocity.device)
+		negative_indices = torch.randperm(batch_size, device=pred_velocity.device)
+		negative_indices = torch.where(
+			negative_indices == indices,
+			(negative_indices + 1) % batch_size,
+			negative_indices,
+		)
+		negative_velocity = target_velocity[negative_indices]
+		negative_loss = self.mean_flat((pred_velocity - negative_velocity) ** 2)
+		return -negative_loss.mean()
 
 	def time_condition(self, t):
 		return t * max(self.steps, 1)
