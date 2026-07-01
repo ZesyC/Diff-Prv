@@ -2,30 +2,59 @@
 
 PyTorch implementation for multimodal recommendation experiments.
 
-## Run on Google Colab
+The maintained model path is **CFM**. It uses the optimized flow-matching implementation.
 
-1. Select `Runtime > Change runtime type > GPU`.
-2. Clone and run a quick one-epoch test:
+## Supported Datasets
 
-```bash
-!git clone https://github.com/ZesyC/Diff-Prv.git
-!cd Diff-Prv && python Main.py --data tiktok --epoch 1 --gpu 0
-```
-
-For full training:
-
-```bash
-!cd Diff-Prv && python Main.py --data tiktok --gpu 0
-```
-
-Supported datasets in this repo:
-
-- `tiktok`
 - `baby`
+- `tiktok`
+- `sports`
 
-For `baby`, unzip image features first:
+For `baby`, the repo can read `Datasets/baby/image_feat.npy.zip` directly. You do not need to unzip it manually.
+For `sports`, make sure `Datasets/sports/` contains `trnMat.pkl`, `tstMat.pkl`, `image_feat.npy`, and `text_feat.npy`.
 
-```bash
-!cd Diff-Prv/Datasets/baby && unzip image_feat.npy.zip
-!cd Diff-Prv && python Main.py --data baby --gpu 0
+## Run
+
+From the project root:
+
+```powershell
+python .\Prv\Main.py `
+  --data baby `
+  --epoch 50 `
+  --gpu 0 `
+  --lr 1e-3 `
+  --batch 1024 `
+  --tstBat 256 `
+  --reg 1e-5 `
+  --latdim 64 `
+  --gnn_layer 1 `
+  --topk 20 `
+  --model_type CFM `
+  --ssl_reg 1e-1 `
+  --temp 0.5 `
+  --tstEpoch 1 `
+  --seed 421 `
+  --keepRate 1 `
+  --dims "[1000]" `
+  --d_emb_size 10 `
+  --steps 5 `
+  --noise_scale 0.1 `
+  --noise_min 0.0001 `
+  --noise_max 0.02 `
+  --sampling_steps 0 `
+  --rebuild_k 1 `
+  --e_loss 0.1 `
+  --ris_lambda 0.5 `
+  --ris_adj_lambda 0.2 `
+  --trans 0 `
+  --cl_method 0 `
+  --gate_dim 32 `
+  --gate_reg 0 `
+  --modal_cond 1 `
+  --cfm_lambda 0.1 `
+  --cross_fm_weight 0.01
 ```
+
+`--model_type optimized` and `--model_type flowmatching_optimized` are accepted as backward-compatible aliases, but all of them are normalized to `CFM`.
+
+You can also run `--data sports`; `--data sport` is accepted as an alias.

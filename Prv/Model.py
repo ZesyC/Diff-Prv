@@ -3,26 +3,12 @@ from torch import nn
 import torch.nn.functional as F
 from Params import args
 import numpy as np
-import random
-import math
-import sys
-import os
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-from Utils.Utils import *
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 init = nn.init.xavier_uniform_
-uniformInit = nn.init.uniform
 
 class ModalGatingNetwork(nn.Module):
-    """
-    Attention-based gating: sinh ra trọng số α riêng cho mỗi modal
-    dựa trên embedding hiện tại của từng node (user/item).
-
-    Input:  h ∈ R^{N x latdim}
-    Output: α ∈ R^{N x num_modals}  (softmax theo dim=-1, tổng = 1)
-    """
     def __init__(self, latdim, num_modals, hidden_dim=32):
         super(ModalGatingNetwork, self).__init__()
         self.gate = nn.Sequential(
@@ -32,7 +18,6 @@ class ModalGatingNetwork(nn.Module):
         )
 
     def forward(self, h):
-        # h: (N, latdim) → logits: (N, num_modals) → weights: (N, num_modals)
         logits = self.gate(h)
         weights = F.softmax(logits, dim=-1)
         return weights
@@ -57,7 +42,7 @@ class Model(nn.Module):
         else:
             self.image_trans = nn.Parameter(init(torch.empty(size=(args.image_feat_dim, args.latdim))))
             self.text_trans = nn.Linear(args.text_feat_dim, args.latdim)
-        if audio_embedding != None:
+        if audio_embedding is not None:
             if args.trans == 1:
                 self.audio_trans = nn.Linear(args.audio_feat_dim, args.latdim)
             else:
@@ -65,7 +50,7 @@ class Model(nn.Module):
 
         self.image_embedding = image_embedding
         self.text_embedding = text_embedding
-        if audio_embedding != None:
+        if audio_embedding is not None:
             self.audio_embedding = audio_embedding
         else:
             self.audio_embedding = None
@@ -98,7 +83,7 @@ class Model(nn.Module):
             return self.text_trans(self.text_embedding)
 
     def getAudioFeats(self):
-        if self.audio_embedding == None:
+        if self.audio_embedding is None:
             return None
         else:
             if args.trans == 0:
@@ -118,7 +103,7 @@ class Model(nn.Module):
             image_feats = self.leakyrelu(torch.mm(self.image_embedding, self.image_trans))
             text_feats = self.text_trans(self.text_embedding)
 
-        if audio_adj != None:
+        if audio_adj is not None:
             if args.trans == 0:
                 audio_feats = self.leakyrelu(torch.mm(self.audio_embedding, self.audio_trans))
             else:
@@ -160,16 +145,13 @@ class Model(nn.Module):
         if audio_adj is not None:
             embedsAudio += args.ris_adj_lambda * embedsAudioAdj
 
-        # --- Dynamic per-node modal gating ---
-        # gate_input: trung bình các modal embeddings, shape (N, latdim)
         if audio_adj is None:
             gate_input = (embedsImage + embedsText) / 2.0
         else:
             gate_input = (embedsImage + embedsText + embedsAudio) / 3.0
 
-        # gate_weights: (N, num_modals), mỗi node có bộ trọng số α riêng
         gate_weights = self.modal_gating(gate_input)
-        self._last_gate_weights = gate_weights.detach()  # lưu để debug / log
+        self._last_gate_weights = gate_weights
 
         if audio_adj is None:
             embedsModal = (gate_weights[:, 0:1] * embedsImage
@@ -201,7 +183,7 @@ class Model(nn.Module):
             image_feats = self.leakyrelu(torch.mm(self.image_embedding, self.image_trans))
             text_feats = self.text_trans(self.text_embedding)
 
-        if audio_adj != None:
+        if audio_adj is not None:
             if args.trans == 0:
                 audio_feats = self.leakyrelu(torch.mm(self.audio_embedding, self.audio_trans))
             else:
@@ -213,7 +195,7 @@ class Model(nn.Module):
         embedsText = torch.concat([self.uEmbeds, F.normalize(text_feats)])
         embedsText = torch.spmm(text_adj, embedsText)
 
-        if audio_adj != None:
+        if audio_adj is not None:
             embedsAudio = torch.concat([self.uEmbeds, F.normalize(audio_feats)])
             embedsAudio = torch.spmm(audio_adj, embedsAudio)
 
@@ -231,7 +213,7 @@ class Model(nn.Module):
             embedsLst2.append(embeds2)
         embeds2 = sum(embedsLst2)
 
-        if audio_adj != None:
+        if audio_adj is not None:
             embeds3 = embedsAudio
             embedsLst3 = [embeds3]
             for gcn in self.gcnLayers:
@@ -239,7 +221,7 @@ class Model(nn.Module):
                 embedsLst3.append(embeds3)
             embeds3 = sum(embedsLst3)
 
-        if audio_adj == None:
+        if audio_adj is None:
             return embeds1[:args.user], embeds1[args.user:], embeds2[:args.user], embeds2[args.user:]
         else:
             return embeds1[:args.user], embeds1[args.user:], embeds2[:args.user], embeds2[args.user:], embeds3[:args.user], embeds3[args.user:]
@@ -251,15 +233,9 @@ class Model(nn.Module):
         return ret
 
     def gate_entropy_loss(self, gate_weights):
-        """
-        Entropy regularization cho gating weights.
-        Maximize entropy H(α) = -Σ α_m * log(α_m) để tránh collapse về 1 modal.
-        Trả về negative entropy (minimize → maximize entropy).
-        Chỉ có hiệu lực khi args.gate_reg > 0.
-        """
         eps = 1e-8
         entropy = -(gate_weights * torch.log(gate_weights + eps)).sum(dim=-1).mean()
-        return -entropy  # minimize this = maximize entropy
+        return -entropy
 
 class GCNLayer(nn.Module):
     def __init__(self):

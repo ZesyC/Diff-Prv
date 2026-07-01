@@ -6,24 +6,16 @@ import scipy.sparse as sp
 import torch
 import torch.utils.data as data
 import torch.utils.data as dataloader
-from collections import defaultdict
-from tqdm import tqdm
-import random
 import os
-
+import zipfile
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Thư mục gốc của project (Diff-Prv/)
 _project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
-
 class DataHandler:
 	def __init__(self):
-		if args.data == 'baby':
-			predir = os.path.join(_project_root, 'Datasets', 'baby') + '/'
-		elif args.data == 'sports':
-			predir = os.path.join(_project_root, 'Datasets', 'sports') + '/'
-		elif args.data == 'tiktok':
-			predir = os.path.join(_project_root, 'Datasets', 'tiktok') + '/'
+		if args.data not in {'baby', 'tiktok', 'sports'}:
+			raise ValueError(f"Unsupported dataset '{args.data}'. Supported datasets: baby, tiktok, sports")
+		predir = os.path.join(_project_root, 'Datasets', args.data) + '/'
 		self.predir = predir
 		self.trnfile = predir + 'trnMat.pkl'
 		self.tstfile = predir + 'tstMat.pkl'
@@ -36,7 +28,6 @@ class DataHandler:
 	def loadOneFile(self, filename):
 		with open(filename, 'rb') as fs:
 			ret = (pickle.load(fs) != 0).astype(np.float32)
-			# ret = pickle.load(fs)
 		if type(ret) != coo_matrix:
 			ret = sp.coo_matrix(ret)
 		return ret
@@ -49,7 +40,6 @@ class DataHandler:
 		return mat.dot(dInvSqrtMat).transpose().dot(dInvSqrtMat).tocoo()
 
 	def makeTorchAdj(self, mat):
-		# make ui adj
 		a = sp.csr_matrix((args.user, args.user))
 		b = sp.csr_matrix((args.item, args.item))
 		mat = sp.vstack([sp.hstack([a, mat]), sp.hstack([mat.transpose(), b])])
@@ -57,14 +47,20 @@ class DataHandler:
 		mat = (mat + sp.eye(mat.shape[0])) * 1.0
 		mat = self.normalizeAdj(mat)
 
-		# make cuda tensor
 		idxs = torch.from_numpy(np.vstack([mat.row, mat.col]).astype(np.int64))
 		vals = torch.from_numpy(mat.data.astype(np.float32))
 		shape = torch.Size(mat.shape)
 		return torch.sparse.FloatTensor(idxs, vals, shape).to(device)
 
 	def loadFeatures(self, filename):
-		feats = np.load(filename)
+		if os.path.exists(filename):
+			feats = np.load(filename)
+		elif os.path.exists(filename + '.zip'):
+			with zipfile.ZipFile(filename + '.zip') as zf:
+				with zf.open(os.path.basename(filename)) as fs:
+					feats = np.load(fs)
+		else:
+			raise FileNotFoundError(f'Feature file not found: {filename}')
 		return torch.tensor(feats).float().to(device), np.shape(feats)[1]
 
 	def LoadData(self):
@@ -84,8 +80,8 @@ class DataHandler:
 		if args.data == 'tiktok':
 			self.audio_feats, args.audio_feat_dim = self.loadFeatures(self.audiofile)
 
-		self.diffusionData = DiffusionData(torch.FloatTensor(self.trnMat.toarray()))
-		self.diffusionLoader = dataloader.DataLoader(self.diffusionData, batch_size=args.batch, shuffle=True, num_workers=0)
+		self.cfmData = CFMData(torch.FloatTensor(self.trnMat.toarray()))
+		self.cfmLoader = dataloader.DataLoader(self.cfmData, batch_size=args.batch, shuffle=True, num_workers=0)
 
 class TrnData(data.Dataset):
 	def __init__(self, coomat):
@@ -95,7 +91,6 @@ class TrnData(data.Dataset):
 		self.negs = np.zeros(len(self.rows)).astype(np.int32)
 
 	def negSampling(self):
-		# Vectorized: generate all negatives at once, fix collisions
 		self.negs = np.random.randint(0, args.item, len(self.rows)).astype(np.int32)
 		for i in range(len(self.rows)):
 			u = self.rows[i]
@@ -131,7 +126,7 @@ class TstData(data.Dataset):
 	def __getitem__(self, idx):
 		return self.tstUsrs[idx], np.reshape(self.csrmat[self.tstUsrs[idx]].toarray(), [-1])
 	
-class DiffusionData(data.Dataset):
+class CFMData(data.Dataset):
 	def __init__(self, data):
 		self.data = data
 
