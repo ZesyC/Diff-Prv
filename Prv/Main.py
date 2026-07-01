@@ -86,12 +86,13 @@ class Coach:
             self.flow_matching = GraphFlowMatching(sigma_min=1e-4).to(device)
             out_dims = eval(args.dims) + [args.item]
             in_dims = out_dims[::-1]
-            self.velocity_model_image = VelocityModel(in_dims, out_dims, args.d_emb_size, norm=args.norm).to(device)
+            cond_dim = args.latdim if args.modal_cond == 1 else 0
+            self.velocity_model_image = VelocityModel(in_dims, out_dims, args.d_emb_size, cond_dim=cond_dim, norm=args.norm).to(device)
             self.velocity_opt_image = torch.optim.Adam(self.velocity_model_image.parameters(), lr=args.lr, weight_decay=0)
-            self.velocity_model_text = VelocityModel(in_dims, out_dims, args.d_emb_size, norm=args.norm).to(device)
+            self.velocity_model_text = VelocityModel(in_dims, out_dims, args.d_emb_size, cond_dim=cond_dim, norm=args.norm).to(device)
             self.velocity_opt_text = torch.optim.Adam(self.velocity_model_text.parameters(), lr=args.lr, weight_decay=0)
             if args.data == 'tiktok':
-                self.velocity_model_audio = VelocityModel(in_dims, out_dims, args.d_emb_size, norm=args.norm).to(device)
+                self.velocity_model_audio = VelocityModel(in_dims, out_dims, args.d_emb_size, cond_dim=cond_dim, norm=args.norm).to(device)
                 self.velocity_opt_audio = torch.optim.Adam(self.velocity_model_audio.parameters(), lr=args.lr, weight_decay=0)
         else:
             if args.model_type == 'flowmatching_original':
@@ -162,10 +163,21 @@ class Coach:
                 if args.data == 'tiktok':
                     self.velocity_opt_audio.zero_grad()
 
-                cfm_loss_image, msi_loss_image = self.flow_matching.training_losses(self.velocity_model_image, batch_item, iEmbeds, batch_index, image_feats)
-                cfm_loss_text, msi_loss_text = self.flow_matching.training_losses(self.velocity_model_text, batch_item, iEmbeds, batch_index, text_feats)
+                # Compute per-user modal conditioning vectors
+                if args.modal_cond == 1:
+                    image_cond = torch.mm(batch_item, image_feats)   # (B, latdim)
+                    text_cond = torch.mm(batch_item, text_feats)     # (B, latdim)
+                    if args.data == 'tiktok':
+                        audio_cond = torch.mm(batch_item, audio_feats)  # (B, latdim)
+                else:
+                    image_cond = text_cond = None
+                    if args.data == 'tiktok':
+                        audio_cond = None
+
+                cfm_loss_image, msi_loss_image = self.flow_matching.training_losses(self.velocity_model_image, batch_item, iEmbeds, batch_index, image_feats, modal_cond=image_cond)
+                cfm_loss_text, msi_loss_text = self.flow_matching.training_losses(self.velocity_model_text, batch_item, iEmbeds, batch_index, text_feats, modal_cond=text_cond)
                 if args.data == 'tiktok':
-                    cfm_loss_audio, msi_loss_audio = self.flow_matching.training_losses(self.velocity_model_audio, batch_item, iEmbeds, batch_index, audio_feats)
+                    cfm_loss_audio, msi_loss_audio = self.flow_matching.training_losses(self.velocity_model_audio, batch_item, iEmbeds, batch_index, audio_feats, modal_cond=audio_cond)
 
                 loss_image = cfm_loss_image.mean() + msi_loss_image.mean() * args.e_loss
                 loss_text = cfm_loss_text.mean() + msi_loss_text.mean() * args.e_loss
@@ -236,10 +248,22 @@ class Coach:
 
                 if args.model_type == 'flowmatching_optimized':
                     x_start = torch.randn_like(batch_item)
-                    denoised_batch_image = self.flow_matching.euler_solve(self.velocity_model_image, x_start, steps=args.steps)
-                    denoised_batch_text = self.flow_matching.euler_solve(self.velocity_model_text, x_start, steps=args.steps)
+
+                    # Compute modal conditioning for inference
+                    if args.modal_cond == 1:
+                        image_cond_inf = torch.mm(batch_item, image_feats)   # (B, latdim)
+                        text_cond_inf = torch.mm(batch_item, text_feats)     # (B, latdim)
+                        if args.data == 'tiktok':
+                            audio_cond_inf = torch.mm(batch_item, audio_feats)
+                    else:
+                        image_cond_inf = text_cond_inf = None
+                        if args.data == 'tiktok':
+                            audio_cond_inf = None
+
+                    denoised_batch_image = self.flow_matching.euler_solve(self.velocity_model_image, x_start, steps=args.steps, cond=image_cond_inf)
+                    denoised_batch_text = self.flow_matching.euler_solve(self.velocity_model_text, x_start, steps=args.steps, cond=text_cond_inf)
                     if args.data == 'tiktok':
-                        denoised_batch_audio = self.flow_matching.euler_solve(self.velocity_model_audio, x_start, steps=args.steps)
+                        denoised_batch_audio = self.flow_matching.euler_solve(self.velocity_model_audio, x_start, steps=args.steps, cond=audio_cond_inf)
                 else:
                     denoised_batch_image = self.diffusion_model.p_sample(self.denoise_model_image, batch_item, args.sampling_steps, args.sampling_noise)
                     denoised_batch_text = self.diffusion_model.p_sample(self.denoise_model_text, batch_item, args.sampling_steps, args.sampling_noise)

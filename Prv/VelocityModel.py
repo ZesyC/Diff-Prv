@@ -5,12 +5,13 @@ import math
 import numpy as np
 
 class VelocityModel(nn.Module):
-    def __init__(self, in_dims, out_dims, emb_size, norm=False, dropout=0.5):
+    def __init__(self, in_dims, out_dims, emb_size, cond_dim=0, norm=False, dropout=0.5):
         super(VelocityModel, self).__init__()
         self.in_dims = in_dims
         self.out_dims = out_dims
         self.time_emb_dim = emb_size
         self.norm = norm
+        self.cond_dim = cond_dim
 
         self.emb_layer = nn.Linear(self.time_emb_dim, self.time_emb_dim)
 
@@ -19,6 +20,18 @@ class VelocityModel(nn.Module):
 
         self.in_layers = nn.ModuleList([nn.Linear(d_in, d_out) for d_in, d_out in zip(in_dims_temp[:-1], in_dims_temp[1:])])
         self.out_layers = nn.ModuleList([nn.Linear(d_in, d_out) for d_in, d_out in zip(out_dims_temp[:-1], out_dims_temp[1:])])
+
+        # --- Modal conditioning via FiLM (Feature-wise Linear Modulation) ---
+        if cond_dim > 0:
+            # Hidden dim = output of last encoder layer (= in_dims_temp[-1])
+            hidden_dim = in_dims_temp[-1]
+            self.cond_gamma = nn.Sequential(
+                nn.Linear(cond_dim, hidden_dim),
+                nn.Sigmoid()  # scale factor γ ∈ (0, 1)
+            )
+            self.cond_beta = nn.Sequential(
+                nn.Linear(cond_dim, hidden_dim),
+            )
 
         self.drop = nn.Dropout(dropout)
         self.init_weights()
@@ -41,7 +54,17 @@ class VelocityModel(nn.Module):
         self.emb_layer.weight.data.normal_(0.0, std)
         self.emb_layer.bias.data.normal_(0.0, 0.001)
 
-    def forward(self, x, t, mess_dropout=True):
+        # Init FiLM layers
+        if self.cond_dim > 0:
+            for module in [self.cond_gamma, self.cond_beta]:
+                for layer in module:
+                    if isinstance(layer, nn.Linear):
+                        size = layer.weight.size()
+                        std = np.sqrt(2.0 / (size[0] + size[1]))
+                        layer.weight.data.normal_(0.0, std)
+                        layer.bias.data.normal_(0.0, 0.001)
+
+    def forward(self, x, t, cond=None, mess_dropout=True):
         device = x.device
         
         # Scale t from [0, 1] to [0, 1000] for better embedding distinction if desired, 
@@ -66,7 +89,13 @@ class VelocityModel(nn.Module):
         for i, layer in enumerate(self.in_layers):
             h = layer(h)
             h = torch.tanh(h)
-            
+
+        # --- FiLM modulation: h = γ(c) * h + β(c) ---
+        if self.cond_dim > 0 and cond is not None:
+            gamma = self.cond_gamma(cond)  # (B, hidden_dim)
+            beta = self.cond_beta(cond)    # (B, hidden_dim)
+            h = gamma * h + beta
+
         for i, layer in enumerate(self.out_layers):
             h = layer(h)
             if i != len(self.out_layers) - 1:

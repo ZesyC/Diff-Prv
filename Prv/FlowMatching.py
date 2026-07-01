@@ -29,12 +29,13 @@ class GraphFlowMatching(nn.Module):
         sigma = self.sigma_min
         return (1 - sigma) * psi_t + (1 - t * (1 - sigma)) * v_t
 
-    def training_losses(self, model, alpha_0, itmEmbeds, batch_index, model_feats):
+    def training_losses(self, model, alpha_0, itmEmbeds, batch_index, model_feats, modal_cond=None):
         """
         alpha_0: Ground truth interaction matrix (batch_size, num_items)
         model: VelocityModel to predict vector field
         itmEmbeds: Item ID embeddings
         model_feats: Multimodal features
+        modal_cond: (Optional) Modal conditioning vector (batch_size, cond_dim)
         """
         batch_size = alpha_0.size(0)
         device = alpha_0.device
@@ -49,8 +50,8 @@ class GraphFlowMatching(nn.Module):
         psi_t = self.compute_path(x_0, alpha_0, t)
         v_target = self.compute_target_velocity(x_0, alpha_0)
         
-        # 4. Predict velocity
-        v_pred = model(psi_t, t)
+        # 4. Predict velocity (with optional modal conditioning)
+        v_pred = model(psi_t, t, cond=modal_cond)
         
         # 5. Compute Graph-CFM loss
         mse_cfm = torch.mean((v_pred - v_target) ** 2, dim=list(range(1, len(v_pred.shape))))
@@ -64,9 +65,10 @@ class GraphFlowMatching(nn.Module):
         
         return cfm_loss, msi_loss
 
-    def euler_solve(self, model, x_start, steps=5):
+    def euler_solve(self, model, x_start, steps=5, cond=None):
         """
         Solve ODE using Euler method from t=0 to t=1
+        cond: (Optional) Modal conditioning vector (batch_size, cond_dim)
         """
         device = x_start.device
         batch_size = x_start.size(0)
@@ -80,7 +82,7 @@ class GraphFlowMatching(nn.Module):
         for i in range(steps):
             t_val = i * dt
             t = torch.full((batch_size,), t_val, device=device)
-            v_pred = model(x_t, t)
+            v_pred = model(x_t, t, cond=cond)
             x_t = x_t + v_pred * dt
             
         return x_t
