@@ -75,7 +75,7 @@ class GraphFlowMatching(nn.Module):
         usr_id_embeds = torch.mm(alpha_0, itmEmbeds)
         msi_loss = torch.mean((usr_model_embeds - usr_id_embeds) ** 2, dim=list(range(1, len(usr_model_embeds.shape))))
         
-        return cfm_loss, msi_loss
+        return cfm_loss, msi_loss, alpha_hat
 
     def euler_solve(self, model, x_start, steps=5, cond=None):
         """

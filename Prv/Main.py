@@ -174,15 +174,27 @@ class Coach:
                     if args.data == 'tiktok':
                         audio_cond = None
 
-                cfm_loss_image, msi_loss_image = self.flow_matching.training_losses(self.velocity_model_image, batch_item, iEmbeds, batch_index, image_feats, modal_cond=image_cond, cfm_lambda=args.cfm_lambda)
-                cfm_loss_text, msi_loss_text = self.flow_matching.training_losses(self.velocity_model_text, batch_item, iEmbeds, batch_index, text_feats, modal_cond=text_cond, cfm_lambda=args.cfm_lambda)
+                cfm_loss_image, msi_loss_image, alpha_hat_image = self.flow_matching.training_losses(self.velocity_model_image, batch_item, iEmbeds, batch_index, image_feats, modal_cond=image_cond, cfm_lambda=args.cfm_lambda)
+                cfm_loss_text, msi_loss_text, alpha_hat_text = self.flow_matching.training_losses(self.velocity_model_text, batch_item, iEmbeds, batch_index, text_feats, modal_cond=text_cond, cfm_lambda=args.cfm_lambda)
                 if args.data == 'tiktok':
-                    cfm_loss_audio, msi_loss_audio = self.flow_matching.training_losses(self.velocity_model_audio, batch_item, iEmbeds, batch_index, audio_feats, modal_cond=audio_cond, cfm_lambda=args.cfm_lambda)
+                    cfm_loss_audio, msi_loss_audio, alpha_hat_audio = self.flow_matching.training_losses(self.velocity_model_audio, batch_item, iEmbeds, batch_index, audio_feats, modal_cond=audio_cond, cfm_lambda=args.cfm_lambda)
 
                 loss_image = cfm_loss_image.mean() + msi_loss_image.mean() * args.e_loss
                 loss_text = cfm_loss_text.mean() + msi_loss_text.mean() * args.e_loss
                 if args.data == 'tiktok':
                     loss_audio = cfm_loss_audio.mean() + msi_loss_audio.mean() * args.e_loss
+                    
+                # Cross-Modal FM Alignment Loss
+                cross_fm_loss = 0.0
+                if args.cross_fm_weight > 0:
+                    sim_it = F.cosine_similarity(alpha_hat_image.unsqueeze(1), alpha_hat_text.unsqueeze(0), dim=-1) / args.temp
+                    labels = torch.arange(batch_index.shape[0], device=device)
+                    cross_fm_loss += F.cross_entropy(sim_it, labels)
+                    if args.data == 'tiktok':
+                        sim_ia = F.cosine_similarity(alpha_hat_image.unsqueeze(1), alpha_hat_audio.unsqueeze(0), dim=-1) / args.temp
+                        sim_ta = F.cosine_similarity(alpha_hat_text.unsqueeze(1), alpha_hat_audio.unsqueeze(0), dim=-1) / args.temp
+                        cross_fm_loss += F.cross_entropy(sim_ia, labels) + F.cross_entropy(sim_ta, labels)
+                    cross_fm_loss = cross_fm_loss * args.cross_fm_weight
             else:
                 self.denoise_opt_image.zero_grad()
                 self.denoise_opt_text.zero_grad()
@@ -208,6 +220,9 @@ class Coach:
                 loss = loss_image + loss_text + loss_audio
             else:
                 loss = loss_image + loss_text
+                
+            if args.model_type == 'flowmatching_optimized':
+                loss = loss + cross_fm_loss
 
             loss.backward()
 
@@ -270,28 +285,31 @@ class Coach:
                     if args.data == 'tiktok':
                         denoised_batch_audio = self.diffusion_model.p_sample(self.denoise_model_audio, batch_item, args.sampling_steps, args.sampling_noise)
 
-                # Vectorized edge list building (replaces nested Python for-loops)
-                _, indices_ = torch.topk(denoised_batch_image, k=args.rebuild_k)
+                # Vectorized edge list building with Confidence-Weighted Edges (Softmax Scores)
+                top_scores, indices_ = torch.topk(denoised_batch_image, k=args.rebuild_k)
+                edge_weights = torch.softmax(top_scores, dim=-1).reshape(-1).cpu().numpy()
                 batch_users = batch_index.unsqueeze(1).expand_as(indices_).reshape(-1).cpu().numpy()
                 batch_items = indices_.reshape(-1).cpu().numpy()
                 u_list_image.append(batch_users)
                 i_list_image.append(batch_items)
-                edge_list_image.append(np.ones(len(batch_users), dtype=np.float32))
+                edge_list_image.append(edge_weights)
 
-                _, indices_ = torch.topk(denoised_batch_text, k=args.rebuild_k)
+                top_scores, indices_ = torch.topk(denoised_batch_text, k=args.rebuild_k)
+                edge_weights = torch.softmax(top_scores, dim=-1).reshape(-1).cpu().numpy()
                 batch_users = batch_index.unsqueeze(1).expand_as(indices_).reshape(-1).cpu().numpy()
                 batch_items = indices_.reshape(-1).cpu().numpy()
                 u_list_text.append(batch_users)
                 i_list_text.append(batch_items)
-                edge_list_text.append(np.ones(len(batch_users), dtype=np.float32))
+                edge_list_text.append(edge_weights)
 
                 if args.data == 'tiktok':
-                    _, indices_ = torch.topk(denoised_batch_audio, k=args.rebuild_k)
+                    top_scores, indices_ = torch.topk(denoised_batch_audio, k=args.rebuild_k)
+                    edge_weights = torch.softmax(top_scores, dim=-1).reshape(-1).cpu().numpy()
                     batch_users = batch_index.unsqueeze(1).expand_as(indices_).reshape(-1).cpu().numpy()
                     batch_items = indices_.reshape(-1).cpu().numpy()
                     u_list_audio.append(batch_users)
                     i_list_audio.append(batch_items)
-                    edge_list_audio.append(np.ones(len(batch_users), dtype=np.float32))
+                    edge_list_audio.append(edge_weights)
 
             # image — concatenate vectorized arrays
             u_list_image = np.concatenate(u_list_image)

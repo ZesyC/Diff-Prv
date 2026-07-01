@@ -40,5 +40,6 @@ def ParseArgs():
 	parser.add_argument('--gate_reg', type=float, default=0.0, help='entropy regularization weight for gating (0=off, e.g. 1e-3 to encourage balanced modal use)')
 	parser.add_argument('--modal_cond', type=int, default=1, help='1: enable modal-conditioned flow matching (FiLM), 0: disable (backward compatible)')
 	parser.add_argument('--cfm_lambda', type=float, default=0.1, help='contrastive flow matching weight (0=standard CFM, >0=delta-FM)')
+	parser.add_argument('--cross_fm_weight', type=float, default=0.01, help='weight for cross-modal flow matching alignment (InfoNCE)')
 	return parser.parse_args()
 args = ParseArgs()
