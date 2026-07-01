@@ -174,10 +174,10 @@ class Coach:
                     if args.data == 'tiktok':
                         audio_cond = None
 
-                cfm_loss_image, msi_loss_image = self.flow_matching.training_losses(self.velocity_model_image, batch_item, iEmbeds, batch_index, image_feats, modal_cond=image_cond)
-                cfm_loss_text, msi_loss_text = self.flow_matching.training_losses(self.velocity_model_text, batch_item, iEmbeds, batch_index, text_feats, modal_cond=text_cond)
+                cfm_loss_image, msi_loss_image = self.flow_matching.training_losses(self.velocity_model_image, batch_item, iEmbeds, batch_index, image_feats, modal_cond=image_cond, cfm_lambda=args.cfm_lambda)
+                cfm_loss_text, msi_loss_text = self.flow_matching.training_losses(self.velocity_model_text, batch_item, iEmbeds, batch_index, text_feats, modal_cond=text_cond, cfm_lambda=args.cfm_lambda)
                 if args.data == 'tiktok':
-                    cfm_loss_audio, msi_loss_audio = self.flow_matching.training_losses(self.velocity_model_audio, batch_item, iEmbeds, batch_index, audio_feats, modal_cond=audio_cond)
+                    cfm_loss_audio, msi_loss_audio = self.flow_matching.training_losses(self.velocity_model_audio, batch_item, iEmbeds, batch_index, audio_feats, modal_cond=audio_cond, cfm_lambda=args.cfm_lambda)
 
                 loss_image = cfm_loss_image.mean() + msi_loss_image.mean() * args.e_loss
                 loss_text = cfm_loss_text.mean() + msi_loss_text.mean() * args.e_loss
@@ -270,47 +270,48 @@ class Coach:
                     if args.data == 'tiktok':
                         denoised_batch_audio = self.diffusion_model.p_sample(self.denoise_model_audio, batch_item, args.sampling_steps, args.sampling_noise)
 
-                top_item, indices_ = torch.topk(denoised_batch_image, k=args.rebuild_k)
-                for i in range(batch_index.shape[0]):
-                    for j in range(indices_[i].shape[0]): 
-                        u_list_image.append(int(batch_index[i].cpu().numpy()))
-                        i_list_image.append(int(indices_[i][j].cpu().numpy()))
-                        edge_list_image.append(1.0)
+                # Vectorized edge list building (replaces nested Python for-loops)
+                _, indices_ = torch.topk(denoised_batch_image, k=args.rebuild_k)
+                batch_users = batch_index.unsqueeze(1).expand_as(indices_).reshape(-1).cpu().numpy()
+                batch_items = indices_.reshape(-1).cpu().numpy()
+                u_list_image.append(batch_users)
+                i_list_image.append(batch_items)
+                edge_list_image.append(np.ones(len(batch_users), dtype=np.float32))
 
-                top_item, indices_ = torch.topk(denoised_batch_text, k=args.rebuild_k)
-                for i in range(batch_index.shape[0]):
-                    for j in range(indices_[i].shape[0]): 
-                        u_list_text.append(int(batch_index[i].cpu().numpy()))
-                        i_list_text.append(int(indices_[i][j].cpu().numpy()))
-                        edge_list_text.append(1.0)
+                _, indices_ = torch.topk(denoised_batch_text, k=args.rebuild_k)
+                batch_users = batch_index.unsqueeze(1).expand_as(indices_).reshape(-1).cpu().numpy()
+                batch_items = indices_.reshape(-1).cpu().numpy()
+                u_list_text.append(batch_users)
+                i_list_text.append(batch_items)
+                edge_list_text.append(np.ones(len(batch_users), dtype=np.float32))
 
                 if args.data == 'tiktok':
-                    top_item, indices_ = torch.topk(denoised_batch_audio, k=args.rebuild_k)
-                    for i in range(batch_index.shape[0]):
-                        for j in range(indices_[i].shape[0]): 
-                            u_list_audio.append(int(batch_index[i].cpu().numpy()))
-                            i_list_audio.append(int(indices_[i][j].cpu().numpy()))
-                            edge_list_audio.append(1.0)
+                    _, indices_ = torch.topk(denoised_batch_audio, k=args.rebuild_k)
+                    batch_users = batch_index.unsqueeze(1).expand_as(indices_).reshape(-1).cpu().numpy()
+                    batch_items = indices_.reshape(-1).cpu().numpy()
+                    u_list_audio.append(batch_users)
+                    i_list_audio.append(batch_items)
+                    edge_list_audio.append(np.ones(len(batch_users), dtype=np.float32))
 
-            # image
-            u_list_image = np.array(u_list_image)
-            i_list_image = np.array(i_list_image)
-            edge_list_image = np.array(edge_list_image)
+            # image — concatenate vectorized arrays
+            u_list_image = np.concatenate(u_list_image)
+            i_list_image = np.concatenate(i_list_image)
+            edge_list_image = np.concatenate(edge_list_image)
             self.image_UI_matrix = self.buildUIMatrix(u_list_image, i_list_image, edge_list_image)
             self.image_UI_matrix = self.model.edgeDropper(self.image_UI_matrix)
 
             # text
-            u_list_text = np.array(u_list_text)
-            i_list_text = np.array(i_list_text)
-            edge_list_text = np.array(edge_list_text)
+            u_list_text = np.concatenate(u_list_text)
+            i_list_text = np.concatenate(i_list_text)
+            edge_list_text = np.concatenate(edge_list_text)
             self.text_UI_matrix = self.buildUIMatrix(u_list_text, i_list_text, edge_list_text)
             self.text_UI_matrix = self.model.edgeDropper(self.text_UI_matrix)
 
             if args.data == 'tiktok':
                 # audio
-                u_list_audio = np.array(u_list_audio)
-                i_list_audio = np.array(i_list_audio)
-                edge_list_audio = np.array(edge_list_audio)
+                u_list_audio = np.concatenate(u_list_audio)
+                i_list_audio = np.concatenate(i_list_audio)
+                edge_list_audio = np.concatenate(edge_list_audio)
                 self.audio_UI_matrix = self.buildUIMatrix(u_list_audio, i_list_audio, edge_list_audio)
                 self.audio_UI_matrix = self.model.edgeDropper(self.audio_UI_matrix)
 

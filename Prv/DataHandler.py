@@ -95,13 +95,12 @@ class TrnData(data.Dataset):
 		self.negs = np.zeros(len(self.rows)).astype(np.int32)
 
 	def negSampling(self):
+		# Vectorized: generate all negatives at once, fix collisions
+		self.negs = np.random.randint(0, args.item, len(self.rows)).astype(np.int32)
 		for i in range(len(self.rows)):
 			u = self.rows[i]
-			while True:
-				iNeg = np.random.randint(args.item)
-				if (u, iNeg) not in self.dokmat:
-					break
-			self.negs[i] = iNeg
+			while (u, self.negs[i]) in self.dokmat:
+				self.negs[i] = np.random.randint(args.item)
 
 	def __len__(self):
 		return len(self.rows)
