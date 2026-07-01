@@ -1,4 +1,7 @@
 import torch
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 import Utils.TimeLogger as logger
 from Utils.TimeLogger import log
 from Params import args

@@ -5,6 +5,9 @@ from Params import args
 import numpy as np
 import random
 import math
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from Utils.Utils import *
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

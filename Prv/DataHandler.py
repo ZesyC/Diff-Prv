@@ -9,17 +9,21 @@ import torch.utils.data as dataloader
 from collections import defaultdict
 from tqdm import tqdm
 import random
+import os
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Thư mục gốc của project (Diff-Prv/)
+_project_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 
 class DataHandler:
 	def __init__(self):
 		if args.data == 'baby':
-			predir = './Datasets/baby/'
+			predir = os.path.join(_project_root, 'Datasets', 'baby') + '/'
 		elif args.data == 'sports':
-			predir = './Datasets/sports/'
+			predir = os.path.join(_project_root, 'Datasets', 'sports') + '/'
 		elif args.data == 'tiktok':
-			predir = './Datasets/tiktok/'
+			predir = os.path.join(_project_root, 'Datasets', 'tiktok') + '/'
 		self.predir = predir
 		self.trnfile = predir + 'trnMat.pkl'
 		self.tstfile = predir + 'tstMat.pkl'
