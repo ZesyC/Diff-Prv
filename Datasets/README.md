@@ -6,7 +6,7 @@ The tiktok dataset is ready for running codes directly.
 
 ### baby
 
-Before running codes on baby dataset, please unzip ./baby/image_feat.npy.zip
+The code can read `./baby/image_feat.npy.zip` directly. You do not need to unzip it manually.
 
 ### sports
 
