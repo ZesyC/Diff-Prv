@@ -311,7 +311,14 @@ class Coach:
             bprLoss = - (scoreDiff).sigmoid().log().sum() / args.batch
             regLoss = self.model.reg_loss() * args.reg
             loss = bprLoss + regLoss
-            
+
+            # --- Gate entropy regularization (chỉ khi gate_reg > 0) ---
+            if args.gate_reg > 0 and hasattr(self.model, '_last_gate_weights'):
+                gateLoss = self.model.gate_entropy_loss(self.model._last_gate_weights) * args.gate_reg
+                loss = loss + gateLoss
+            else:
+                gateLoss = torch.tensor(0.0)
+
             epRecLoss += bprLoss.item()
             epLoss += loss.item()
 
@@ -344,12 +351,13 @@ class Coach:
             loss.backward()
             self.opt.step()
 
-            log('Step %d/%d: bpr : %.3f ; reg : %.3f ; cl : %.3f ' % (
-                i, 
+            log('Step %d/%d: bpr : %.3f ; reg : %.3f ; cl : %.3f ; gate : %.3f' % (
+                i,
                 steps,
                 bprLoss.item(),
                 regLoss.item(),
-                clLoss.item()
+                clLoss.item(),
+                gateLoss.item() if hasattr(gateLoss, 'item') else gateLoss
                 ), save=False, oneline=True)
 
         ret = dict()

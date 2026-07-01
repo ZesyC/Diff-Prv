@@ -36,5 +36,7 @@ def ParseArgs():
 	parser.add_argument('--ris_adj_lambda', type=float, default=0.2)
 	parser.add_argument('--trans', type=int, default=0, help='0: R*R, 1: Linear, 2: allrecipes')
 	parser.add_argument('--cl_method', type=int, default=0, help='0:m vs m ; 1:m vs main')
+	parser.add_argument('--gate_dim', type=int, default=32, help='hidden dim of ModalGatingNetwork (dynamic modal weighting)')
+	parser.add_argument('--gate_reg', type=float, default=0.0, help='entropy regularization weight for gating (0=off, e.g. 1e-3 to encourage balanced modal use)')
 	return parser.parse_args()
 args = ParseArgs()
