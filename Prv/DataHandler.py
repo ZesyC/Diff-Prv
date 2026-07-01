@@ -82,6 +82,7 @@ class DataHandler:
 
 		self.cfmData = CFMData(torch.FloatTensor(self.trnMat.toarray()))
 		self.cfmLoader = dataloader.DataLoader(self.cfmData, batch_size=args.batch, shuffle=True, num_workers=0)
+		self.cfmEvalLoader = dataloader.DataLoader(self.cfmData, batch_size=args.batch, shuffle=False, num_workers=0)
 
 class TrnData(data.Dataset):
 	def __init__(self, coomat):

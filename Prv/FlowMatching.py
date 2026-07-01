@@ -65,7 +65,8 @@ class GraphFlowMatching(nn.Module):
         for i in range(steps):
             t_val = i * dt
             t = torch.full((batch_size,), t_val, device=device)
-            v_pred = model(x_t, t, cond=cond)
+            # Sampling/rebuild is inference, so do not apply training-time dropout.
+            v_pred = model(x_t, t, cond=cond, mess_dropout=False)
             x_t = x_t + v_pred * dt
             
         return x_t

@@ -119,6 +119,12 @@ class Coach:
         return torch.sparse.FloatTensor(idxs, vals, shape).to(device)
 
     def trainEpoch(self):
+        self.model.train()
+        self.velocity_model_image.train()
+        self.velocity_model_text.train()
+        if args.data == 'tiktok':
+            self.velocity_model_audio.train()
+
         trnLoader = self.handler.trnLoader
         trnLoader.dataset.negSampling()
         epLoss, epRecLoss, epClLoss = 0, 0, 0
@@ -128,6 +134,7 @@ class Coach:
         steps = len(trnLoader)
 
         cfmLoader = self.handler.cfmLoader
+        cfmEvalLoader = self.handler.cfmEvalLoader
         cfm_steps = len(cfmLoader)
 
         for i, batch in enumerate(cfmLoader):
@@ -224,6 +231,14 @@ class Coach:
         log('')
         log('Start to re-build UI matrix using Euler Solver')
 
+        self.velocity_model_image.eval()
+        self.velocity_model_text.eval()
+        if args.data == 'tiktok':
+            self.velocity_model_audio.eval()
+
+        rebuild_generator = torch.Generator(device=device)
+        rebuild_generator.manual_seed(args.seed)
+
         with torch.no_grad():
             image_feats = self.model.getImageFeats().detach()
             text_feats = self.model.getTextFeats().detach()
@@ -243,11 +258,16 @@ class Coach:
                 i_list_audio = []
                 edge_list_audio = []
 
-            for _, batch in enumerate(cfmLoader):
+            for _, batch in enumerate(cfmEvalLoader):
                 batch_item, batch_index = batch
                 batch_item, batch_index = batch_item.to(device), batch_index.to(device)
 
-                x_start = torch.randn_like(batch_item)
+                x_start = torch.randn(
+                    batch_item.shape,
+                    dtype=batch_item.dtype,
+                    device=device,
+                    generator=rebuild_generator,
+                )
 
                 if args.modal_cond == 1:
                     image_cond_inf = torch.mm(batch_item, image_feats)
@@ -309,6 +329,11 @@ class Coach:
                 self.audio_UI_matrix = self.model.edgeDropper(self.audio_UI_matrix)
 
         log('UI matrix built!')
+
+        self.velocity_model_image.train()
+        self.velocity_model_text.train()
+        if args.data == 'tiktok':
+            self.velocity_model_audio.train()
 
         for i, tem in enumerate(trnLoader):
             ancs, poss, negs = tem
@@ -388,32 +413,42 @@ class Coach:
         return ret
 
     def testEpoch(self):
-        tstLoader = self.handler.tstLoader
-        epRecall, epNdcg, epPrecision = [0] * 3
-        i = 0
-        num = tstLoader.dataset.__len__()
-        steps = len(tstLoader)
+        self.model.eval()
 
-        if args.data == 'tiktok':
-            usrEmbeds, itmEmbeds = self.model.forward_MM(self.handler.torchBiAdj, self.image_UI_matrix, self.text_UI_matrix, self.audio_UI_matrix)
-        else:
-            usrEmbeds, itmEmbeds = self.model.forward_MM(self.handler.torchBiAdj, self.image_UI_matrix, self.text_UI_matrix)
+        with torch.no_grad():
+            tstLoader = self.handler.tstLoader
+            epRecall, epNdcg, epPrecision = [0] * 3
+            i = 0
+            num = tstLoader.dataset.__len__()
+            steps = len(tstLoader)
 
-        for usr, trnMask in tstLoader:
-            i += 1
-            usr = usr.long().to(device)
-            trnMask = trnMask.to(device)
-            allPreds = torch.mm(usrEmbeds[usr], torch.transpose(itmEmbeds, 1, 0)) * (1 - trnMask) - trnMask * 1e8
-            _, topLocs = torch.topk(allPreds, args.topk)
-            recall, ndcg, precision = self.calcRes(topLocs.cpu().numpy(), self.handler.tstLoader.dataset.tstLocs, usr)
-            epRecall += recall
-            epNdcg += ndcg
-            epPrecision += precision
-            log('Steps %d/%d: recall = %.2f, ndcg = %.2f , precision = %.2f   ' % (i, steps, recall, ndcg, precision), save=False, oneline=True)
-        ret = dict()
-        ret['Recall'] = epRecall / num
-        ret['NDCG'] = epNdcg / num
-        ret['Precision'] = epPrecision / num
+            if args.data == 'tiktok':
+                usrEmbeds, itmEmbeds = self.model.forward_MM(self.handler.torchBiAdj, self.image_UI_matrix, self.text_UI_matrix, self.audio_UI_matrix)
+            else:
+                usrEmbeds, itmEmbeds = self.model.forward_MM(self.handler.torchBiAdj, self.image_UI_matrix, self.text_UI_matrix)
+
+            for usr, trnMask in tstLoader:
+                i += 1
+                usr = usr.long().to(device)
+                trnMask = trnMask.to(device)
+                allPreds = torch.mm(usrEmbeds[usr], torch.transpose(itmEmbeds, 1, 0)) * (1 - trnMask) - trnMask * 1e8
+                _, topLocs = torch.topk(allPreds, args.topk)
+                recall, ndcg, precision = self.calcRes(
+                    topLocs.cpu().numpy(),
+                    self.handler.tstLoader.dataset.tstLocs,
+                    usr.cpu().numpy(),
+                )
+                epRecall += recall
+                epNdcg += ndcg
+                epPrecision += precision
+                log('Steps %d/%d: recall = %.2f, ndcg = %.2f , precision = %.2f   ' % (i, steps, recall, ndcg, precision), save=False, oneline=True)
+
+            ret = dict()
+            ret['Recall'] = epRecall / num
+            ret['NDCG'] = epNdcg / num
+            ret['Precision'] = epPrecision / num
+
+        self.model.train()
         return ret
 
     def calcRes(self, topLocs, tstLocs, batIds):
@@ -421,7 +456,7 @@ class Coach:
         allRecall = allNdcg = allPrecision = 0
         for i in range(len(batIds)):
             temTopLocs = list(topLocs[i])
-            temTstLocs = tstLocs[batIds[i]]
+            temTstLocs = tstLocs[int(batIds[i])]
             tstNum = len(temTstLocs)
             maxDcg = np.sum([np.reciprocal(np.log2(loc + 2)) for loc in range(min(tstNum, args.topk))])
             recall = dcg = precision = 0
