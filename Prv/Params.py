@@ -75,6 +75,7 @@ def ParseArgs():
     parser.add_argument('--gate_dim', type=int, default=32, help='hidden dim of ModalGatingNetwork')
     parser.add_argument('--gate_reg', type=float, default=0.0, help='entropy regularization weight for gating')
     parser.add_argument('--modal_cond', type=int, default=1, choices=[0, 1], help='1: enable modal-conditioned CFM, 0: disable')
+    parser.add_argument('--behavior_cond', type=int, default=1, choices=[0, 1], help='1: concatenate collaborative user embedding into CFM condition')
     parser.add_argument('--cfm_lambda', type=float, default=0.1, help='contrastive flow matching weight')
     parser.add_argument('--cross_fm_weight', type=float, default=0.01, help='cross-modal flow matching alignment weight')
 

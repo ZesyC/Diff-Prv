@@ -86,7 +86,9 @@ class Coach:
         self.flow_matching = GraphFlowMatching(sigma_min=1e-4).to(device)
         out_dims = list(args.dims) + [args.item]
         in_dims = out_dims[::-1]
-        cond_dim = args.latdim if args.modal_cond == 1 else 0
+        cond_dim = 0
+        if args.modal_cond == 1:
+            cond_dim = args.latdim * (2 if args.behavior_cond == 1 else 1)
         self.velocity_model_image = VelocityModel(in_dims, out_dims, args.d_emb_size, cond_dim=cond_dim, norm=args.norm).to(device)
         self.velocity_opt_image = torch.optim.Adam(self.velocity_model_image.parameters(), lr=args.lr, weight_decay=0)
         self.velocity_model_text = VelocityModel(in_dims, out_dims, args.d_emb_size, cond_dim=cond_dim, norm=args.norm).to(device)
@@ -94,6 +96,23 @@ class Coach:
         if args.data == 'tiktok':
             self.velocity_model_audio = VelocityModel(in_dims, out_dims, args.d_emb_size, cond_dim=cond_dim, norm=args.norm).to(device)
             self.velocity_opt_audio = torch.optim.Adam(self.velocity_model_audio.parameters(), lr=args.lr, weight_decay=0)
+
+    def buildBehaviorGuidedCond(self, batch_item, batch_index, modal_feats):
+        if modal_feats.size(1) != args.latdim:
+            raise ValueError(f'Projected modal feature dim must equal latdim={args.latdim}, got {modal_feats.size(1)}')
+
+        interaction_count = batch_item.sum(dim=1, keepdim=True)
+        modal_pref = torch.mm(batch_item, modal_feats) / interaction_count.clamp_min(1.0)
+        global_modal_pref = modal_feats.mean(dim=0, keepdim=True).expand_as(modal_pref)
+        modal_pref = torch.where(interaction_count > 0, modal_pref, global_modal_pref)
+        modal_pref = F.normalize(modal_pref, dim=-1)
+
+        if args.behavior_cond == 0:
+            return modal_pref
+
+        user_cf = self.model.getUserEmbeds()[batch_index].detach()
+        user_cf = F.normalize(user_cf, dim=-1)
+        return torch.cat([user_cf, modal_pref], dim=-1)
 
     def normalizeAdj(self, mat): 
         degree = np.array(mat.sum(axis=-1))
@@ -154,10 +173,10 @@ class Coach:
                 self.velocity_opt_audio.zero_grad()
 
             if args.modal_cond == 1:
-                image_cond = torch.mm(batch_item, image_feats)
-                text_cond = torch.mm(batch_item, text_feats)
+                image_cond = self.buildBehaviorGuidedCond(batch_item, batch_index, image_feats).detach()
+                text_cond = self.buildBehaviorGuidedCond(batch_item, batch_index, text_feats).detach()
                 if args.data == 'tiktok':
-                    audio_cond = torch.mm(batch_item, audio_feats)
+                    audio_cond = self.buildBehaviorGuidedCond(batch_item, batch_index, audio_feats).detach()
             else:
                 image_cond = text_cond = None
                 if args.data == 'tiktok':
@@ -270,10 +289,10 @@ class Coach:
                 )
 
                 if args.modal_cond == 1:
-                    image_cond_inf = torch.mm(batch_item, image_feats)
-                    text_cond_inf = torch.mm(batch_item, text_feats)
+                    image_cond_inf = self.buildBehaviorGuidedCond(batch_item, batch_index, image_feats).detach()
+                    text_cond_inf = self.buildBehaviorGuidedCond(batch_item, batch_index, text_feats).detach()
                     if args.data == 'tiktok':
-                        audio_cond_inf = torch.mm(batch_item, audio_feats)
+                        audio_cond_inf = self.buildBehaviorGuidedCond(batch_item, batch_index, audio_feats).detach()
                 else:
                     image_cond_inf = text_cond_inf = None
                     if args.data == 'tiktok':

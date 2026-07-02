@@ -53,6 +53,7 @@ python .\Prv\Main.py `
   --gate_dim 32 `
   --gate_reg 0 `
   --modal_cond 1 `
+  --behavior_cond 1 `
   --cfm_lambda 0.1 `
   --cross_fm_weight 0.01
 ```
@@ -93,6 +94,7 @@ python .\Prv\Main.py `
   --gate_dim 32 `
   --gate_reg 0 `
   --modal_cond 1 `
+  --behavior_cond 1 `
   --cfm_lambda 0.1 `
   --cross_fm_weight 0.01
 ```
@@ -133,6 +135,7 @@ python .\Prv\Main.py `
   --gate_dim 32 `
   --gate_reg 0 `
   --modal_cond 1 `
+  --behavior_cond 1 `
   --cfm_lambda 0.1 `
   --cross_fm_weight 0.01
 ```
