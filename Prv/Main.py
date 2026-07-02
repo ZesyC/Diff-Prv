@@ -57,21 +57,52 @@ class Coach:
         precisionMax = 0
         bestEpoch = 0
 
+        # Overfitting monitoring
+        history = {
+            'train_loss': [], 'train_bpr': [], 'train_cl': [],
+            'test_recall': [], 'test_ndcg': [], 'test_precision': [],
+            'test_epochs': [],
+        }
+        # Early stopping
+        no_improve = 0
+
         log('Model Initialized')
 
         for ep in range(0, args.epoch):
             tstFlag = (ep % args.tstEpoch == 0)
             reses = self.trainEpoch()
             log(self.makePrint('Train', ep, reses, tstFlag))
+
+            history['train_loss'].append(reses['Loss'])
+            history['train_bpr'].append(reses['BPR Loss'])
+            history['train_cl'].append(reses['CL loss'])
+
             if tstFlag:
                 reses = self.testEpoch()
+
+                history['test_epochs'].append(ep)
+                history['test_recall'].append(reses['Recall'])
+                history['test_ndcg'].append(reses['NDCG'])
+                history['test_precision'].append(reses['Precision'])
+
                 if (reses['Recall'] > recallMax):
                     recallMax = reses['Recall']
                     ndcgMax = reses['NDCG']
                     precisionMax = reses['Precision']
                     bestEpoch = ep
-                log(self.makePrint('Test', ep, reses, tstFlag))
+                    no_improve = 0
+                else:
+                    no_improve += 1
+
+                trend = 'NEW BEST' if no_improve == 0 else 'no improve %d/%d' % (no_improve, args.patience)
+                log(self.makePrint('Test', ep, reses, tstFlag) + '[%s]' % trend)
             print()
+
+            if args.patience > 0 and no_improve >= args.patience:
+                log('Early stopping at epoch %d: no improvement for %d test epochs' % (ep, args.patience))
+                break
+
+        self.printOverfitDiagnostic(history, bestEpoch)
         print('Best epoch : ', bestEpoch, ' , Recall : ', recallMax, ' , NDCG : ', ndcgMax, ' , Precision', precisionMax)
         return {
             'best_epoch': bestEpoch,
@@ -79,6 +110,56 @@ class Coach:
             'ndcg': ndcgMax,
             'precision': precisionMax
         }
+
+    def printOverfitDiagnostic(self, history, bestEpoch):
+        test_epochs = history['test_epochs']
+        test_recall = history['test_recall']
+        test_ndcg = history['test_ndcg']
+
+        log('')
+        log('=' * 60)
+        log('OVERFITTING DIAGNOSTIC')
+        log('=' * 60)
+
+        if len(test_recall) < 2:
+            log('Not enough test epochs for diagnostic')
+            log('=' * 60)
+            return
+
+        best_idx = test_recall.index(max(test_recall))
+        best_recall = test_recall[best_idx]
+        final_recall = test_recall[-1]
+        best_ndcg = test_ndcg[best_idx]
+        final_ndcg = test_ndcg[-1]
+        total_trained = test_epochs[-1] + 1
+
+        log('Best test epoch: %d / %d trained' % (bestEpoch, total_trained))
+        log('Recall : %.4f (best) -> %.4f (final), delta = %+.4f' % (best_recall, final_recall, final_recall - best_recall))
+        log('NDCG   : %.4f (best) -> %.4f (final), delta = %+.4f' % (best_ndcg, final_ndcg, final_ndcg - best_ndcg))
+
+        if len(history['train_loss']) >= 2:
+            log('Train Loss: %.4f (first) -> %.4f (last)' % (history['train_loss'][0], history['train_loss'][-1]))
+            log('BPR Loss  : %.4f (first) -> %.4f (last)' % (history['train_bpr'][0], history['train_bpr'][-1]))
+
+        recall_drop_pct = (best_recall - final_recall) / best_recall * 100 if best_recall > 0 else 0
+        if recall_drop_pct > 5:
+            verdict = 'OVERFITTING - Recall dropped %.1f%% after peak' % recall_drop_pct
+        elif recall_drop_pct > 1:
+            verdict = 'MILD OVERFITTING - Recall dropped %.1f%% after peak' % recall_drop_pct
+        elif bestEpoch >= total_trained - 1:
+            verdict = 'POSSIBLY UNDERTRAINED - best epoch is the last epoch'
+        else:
+            verdict = 'HEALTHY - metrics stable after peak'
+        log('VERDICT: %s' % verdict)
+
+        log('')
+        log('%-8s %-12s %-12s %-12s' % ('Epoch', 'Recall', 'NDCG', 'Precision'))
+        log('-' * 46)
+        for i, ep in enumerate(test_epochs):
+            marker = ' <-- BEST' if ep == bestEpoch else ''
+            log('%-8d %-12.4f %-12.4f %-12.4f%s' % (
+                ep, test_recall[i], test_ndcg[i], history['test_precision'][i], marker))
+        log('=' * 60)
 
     def prepareModel(self):
         if args.data == 'tiktok':

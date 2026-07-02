@@ -53,6 +53,7 @@ def ParseArgs():
     parser.add_argument('--ssl_reg', default=1e-1, type=float, help='contrastive learning weight')
     parser.add_argument('--temp', default=0.5, type=float, help='temperature in contrastive learning')
     parser.add_argument('--tstEpoch', default=1, type=int, help='test frequency while training')
+    parser.add_argument('--patience', default=0, type=int, help='early stopping patience in test epochs (0 = disabled)')
     parser.add_argument('--seed', type=int, default=421, help='random seed')
 
     parser.add_argument('--keepRate', default=1.0, type=float, help='ratio of graph edges to keep')
