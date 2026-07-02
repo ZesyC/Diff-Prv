@@ -78,6 +78,22 @@ def ParseArgs():
     parser.add_argument('--cfm_lambda', type=float, default=0.1, help='contrastive flow matching weight')
     parser.add_argument('--cross_fm_weight', type=float, default=0.01, help='cross-modal flow matching alignment weight')
 
+    # === Improvement A: Momentum Graph Update ===
+    parser.add_argument('--ui_momentum', type=float, default=0.0,
+        help='EMA momentum for UI matrix blending. 0=full rebuild (default), 0.3-0.5 recommended')
+
+    # === Improvement B: Spectral Denoising ===
+    parser.add_argument('--spectral_denoise', type=_parse_bool, default=False,
+        help='Enable SVD-based spectral denoising for modal features before GCN')
+    parser.add_argument('--spectral_topk', type=int, default=32,
+        help='Number of top singular values to keep in spectral denoising')
+
+    # === Improvement C: Hard Negative Mining ===
+    parser.add_argument('--hard_neg', type=_parse_bool, default=False,
+        help='Enable hard negative mining for BPR loss')
+    parser.add_argument('--hard_neg_pool', type=int, default=50,
+        help='Pool size of hard negative candidates to sample from')
+
     parsed = parser.parse_args()
     if parsed.data == 'sport':
         parsed.data = 'sports'

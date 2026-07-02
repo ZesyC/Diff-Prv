@@ -92,6 +92,16 @@ class Model(nn.Module):
                 audio_feats = self.audio_trans(self.audio_embedding)
         return audio_feats
 
+    def spectral_denoise(self, feat, topk=None):
+        """SVD-based denoising: giữ top-k singular values, zero-out phần còn lại."""
+        if topk is None:
+            topk = args.spectral_topk
+        U, S, Vh = torch.linalg.svd(feat, full_matrices=False)
+        k = min(topk, S.shape[0])
+        S_filtered = S.clone()
+        S_filtered[k:] = 0.0
+        return U @ torch.diag(S_filtered) @ Vh
+
     def forward_MM(self, adj, image_adj, text_adj, audio_adj=None):
         if args.trans == 0:
             image_feats = self.leakyrelu(torch.mm(self.image_embedding, self.image_trans))
@@ -108,6 +118,13 @@ class Model(nn.Module):
                 audio_feats = self.leakyrelu(torch.mm(self.audio_embedding, self.audio_trans))
             else:
                 audio_feats = self.audio_trans(self.audio_embedding)
+
+        # === Improvement B: Spectral Denoising ===
+        if args.spectral_denoise:
+            image_feats = self.spectral_denoise(image_feats)
+            text_feats = self.spectral_denoise(text_feats)
+            if audio_adj is not None:
+                audio_feats = self.spectral_denoise(audio_feats)
 
         embedsImageAdj = torch.concat([self.uEmbeds, self.iEmbeds])
         embedsImageAdj = torch.spmm(image_adj, embedsImageAdj)
@@ -188,6 +205,13 @@ class Model(nn.Module):
                 audio_feats = self.leakyrelu(torch.mm(self.audio_embedding, self.audio_trans))
             else:
                 audio_feats = self.audio_trans(self.audio_embedding)
+
+        # === Improvement B: Spectral Denoising ===
+        if args.spectral_denoise:
+            image_feats = self.spectral_denoise(image_feats)
+            text_feats = self.spectral_denoise(text_feats)
+            if audio_adj is not None:
+                audio_feats = self.spectral_denoise(audio_feats)
 
         embedsImage = torch.concat([self.uEmbeds, F.normalize(image_feats)])
         embedsImage = torch.spmm(image_adj, embedsImage)

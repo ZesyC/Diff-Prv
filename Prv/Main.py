@@ -95,6 +95,11 @@ class Coach:
             self.velocity_model_audio = VelocityModel(in_dims, out_dims, args.d_emb_size, cond_dim=cond_dim, norm=args.norm).to(device)
             self.velocity_opt_audio = torch.optim.Adam(self.velocity_model_audio.parameters(), lr=args.lr, weight_decay=0)
 
+        # === Improvement A: Momentum Graph — lưu trạng thái UI matrix trước đó ===
+        self.prev_image_UI = None
+        self.prev_text_UI = None
+        self.prev_audio_UI = None
+
     def normalizeAdj(self, mat): 
         degree = np.array(mat.sum(axis=-1))
         dInvSqrt = np.reshape(np.power(degree, -0.5), [-1])
@@ -312,20 +317,42 @@ class Coach:
             u_list_image = np.concatenate(u_list_image)
             i_list_image = np.concatenate(i_list_image)
             edge_list_image = np.concatenate(edge_list_image)
-            self.image_UI_matrix = self.buildUIMatrix(u_list_image, i_list_image, edge_list_image)
-            self.image_UI_matrix = self.model.edgeDropper(self.image_UI_matrix)
+            euler_image = self.buildUIMatrix(u_list_image, i_list_image, edge_list_image)
 
             u_list_text = np.concatenate(u_list_text)
             i_list_text = np.concatenate(i_list_text)
             edge_list_text = np.concatenate(edge_list_text)
-            self.text_UI_matrix = self.buildUIMatrix(u_list_text, i_list_text, edge_list_text)
-            self.text_UI_matrix = self.model.edgeDropper(self.text_UI_matrix)
+            euler_text = self.buildUIMatrix(u_list_text, i_list_text, edge_list_text)
 
             if args.data == 'tiktok':
                 u_list_audio = np.concatenate(u_list_audio)
                 i_list_audio = np.concatenate(i_list_audio)
                 edge_list_audio = np.concatenate(edge_list_audio)
-                self.audio_UI_matrix = self.buildUIMatrix(u_list_audio, i_list_audio, edge_list_audio)
+                euler_audio = self.buildUIMatrix(u_list_audio, i_list_audio, edge_list_audio)
+
+            # === Improvement A: Momentum Graph Update (EMA blend) ===
+            m = args.ui_momentum
+            if m > 0 and self.prev_image_UI is not None:
+                self.image_UI_matrix = ((1 - m) * euler_image + m * self.prev_image_UI).coalesce()
+                self.text_UI_matrix = ((1 - m) * euler_text + m * self.prev_text_UI).coalesce()
+                if args.data == 'tiktok':
+                    self.audio_UI_matrix = ((1 - m) * euler_audio + m * self.prev_audio_UI).coalesce()
+            else:
+                self.image_UI_matrix = euler_image
+                self.text_UI_matrix = euler_text
+                if args.data == 'tiktok':
+                    self.audio_UI_matrix = euler_audio
+
+            # Lưu bản pre-dropout cho momentum epoch tiếp
+            self.prev_image_UI = euler_image.clone()
+            self.prev_text_UI = euler_text.clone()
+            if args.data == 'tiktok':
+                self.prev_audio_UI = euler_audio.clone()
+
+            # Edge dropout
+            self.image_UI_matrix = self.model.edgeDropper(self.image_UI_matrix)
+            self.text_UI_matrix = self.model.edgeDropper(self.text_UI_matrix)
+            if args.data == 'tiktok':
                 self.audio_UI_matrix = self.model.edgeDropper(self.audio_UI_matrix)
 
         log('UI matrix built!')
@@ -349,7 +376,29 @@ class Coach:
                 usrEmbeds, itmEmbeds = self.model.forward_MM(self.handler.torchBiAdj, self.image_UI_matrix, self.text_UI_matrix)
             ancEmbeds = usrEmbeds[ancs]
             posEmbeds = itmEmbeds[poss]
-            negEmbeds = itmEmbeds[negs]
+
+            # === Improvement C: Hard Negative Mining ===
+            if args.hard_neg:
+                with torch.no_grad():
+                    anc_emb_det = ancEmbeds.detach()
+                    itm_emb_det = itmEmbeds.detach()
+                    all_scores = anc_emb_det @ itm_emb_det.T  # (B, num_items)
+                    # Mask interacted items → -inf
+                    trn_mask_batch = torch.tensor(
+                        self.handler.trnMat[ancs.cpu().numpy()].toarray(),
+                        device=device, dtype=torch.bool
+                    )
+                    all_scores[trn_mask_batch] = -float('inf')
+                    # Top-K hard negative candidates
+                    K = min(args.hard_neg_pool, args.item)
+                    _, hard_candidates = torch.topk(all_scores, k=K, dim=-1)  # (B, K)
+                    # Random chọn 1 trong K
+                    rand_idx = torch.randint(K, (ancs.shape[0],), device=device)
+                    hard_negs = hard_candidates[torch.arange(ancs.shape[0], device=device), rand_idx]
+                negEmbeds = itmEmbeds[hard_negs]
+            else:
+                negEmbeds = itmEmbeds[negs]
+
             scoreDiff = pairPredict(ancEmbeds, posEmbeds, negEmbeds)
             bprLoss = - (scoreDiff).sigmoid().log().sum() / ancs.shape[0]
             regLoss = self.model.reg_loss() * args.reg
