@@ -85,6 +85,8 @@ def ParseArgs():
         parsed.data = 'sports'
     if parsed.cfm_residual_weight < 0:
         parser.error('--cfm_residual_weight must be non-negative')
+    if parsed.rebuild_k <= 0:
+        parser.error('--rebuild_k must be positive')
 
     model_type = _MODEL_ALIASES.get(parsed.model_type.lower())
     if model_type is None:

@@ -138,6 +138,22 @@ class Coach:
 
         return torch.sparse.FloatTensor(idxs, vals, shape).to(device)
 
+    def collectRebuildEdges(self, scores, batch_item, batch_index):
+        scores = scores.masked_fill(batch_item.bool(), float('-inf'))
+        top_k = min(args.rebuild_k, scores.size(1))
+        top_scores, indices_ = torch.topk(scores, k=top_k)
+
+        positive_scores = top_scores.clamp_min(0.0)
+        edge_weights = positive_scores / (positive_scores + 1.0)
+        valid_edges = torch.isfinite(top_scores) & (edge_weights > 0)
+        batch_users = batch_index.unsqueeze(1).expand_as(indices_)
+
+        return (
+            batch_users[valid_edges].cpu().numpy(),
+            indices_[valid_edges].cpu().numpy(),
+            edge_weights[valid_edges].cpu().numpy(),
+        )
+
     def trainEpoch(self):
         self.model.train()
         self.velocity_model_image.train()
@@ -304,27 +320,24 @@ class Coach:
                 if args.data == 'tiktok':
                     denoised_batch_audio = self.flow_matching.euler_solve(self.velocity_model_audio, x_start, steps=args.steps, cond=audio_cond_inf)
 
-                top_scores, indices_ = torch.topk(denoised_batch_image, k=args.rebuild_k)
-                edge_weights = torch.softmax(top_scores, dim=-1).reshape(-1).cpu().numpy()
-                batch_users = batch_index.unsqueeze(1).expand_as(indices_).reshape(-1).cpu().numpy()
-                batch_items = indices_.reshape(-1).cpu().numpy()
+                batch_users, batch_items, edge_weights = self.collectRebuildEdges(
+                    denoised_batch_image, batch_item, batch_index
+                )
                 u_list_image.append(batch_users)
                 i_list_image.append(batch_items)
                 edge_list_image.append(edge_weights)
 
-                top_scores, indices_ = torch.topk(denoised_batch_text, k=args.rebuild_k)
-                edge_weights = torch.softmax(top_scores, dim=-1).reshape(-1).cpu().numpy()
-                batch_users = batch_index.unsqueeze(1).expand_as(indices_).reshape(-1).cpu().numpy()
-                batch_items = indices_.reshape(-1).cpu().numpy()
+                batch_users, batch_items, edge_weights = self.collectRebuildEdges(
+                    denoised_batch_text, batch_item, batch_index
+                )
                 u_list_text.append(batch_users)
                 i_list_text.append(batch_items)
                 edge_list_text.append(edge_weights)
 
                 if args.data == 'tiktok':
-                    top_scores, indices_ = torch.topk(denoised_batch_audio, k=args.rebuild_k)
-                    edge_weights = torch.softmax(top_scores, dim=-1).reshape(-1).cpu().numpy()
-                    batch_users = batch_index.unsqueeze(1).expand_as(indices_).reshape(-1).cpu().numpy()
-                    batch_items = indices_.reshape(-1).cpu().numpy()
+                    batch_users, batch_items, edge_weights = self.collectRebuildEdges(
+                        denoised_batch_audio, batch_item, batch_index
+                    )
                     u_list_audio.append(batch_users)
                     i_list_audio.append(batch_items)
                     edge_list_audio.append(edge_weights)
