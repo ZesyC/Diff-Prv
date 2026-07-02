@@ -32,6 +32,10 @@ class Coach:
         for met in mets:
             self.metrics['Train' + met] = list()
             self.metrics['Test' + met] = list()
+        self.test_item_sets = [
+            set(items) if items is not None else set()
+            for items in self.handler.tstLoader.dataset.tstLocs
+        ]
 
     def makePrint(self, name, ep, reses, save):
         ret = 'Epoch %d/%d, %s: ' % (ep, args.epoch, name)
@@ -138,7 +142,71 @@ class Coach:
 
         return torch.sparse.FloatTensor(idxs, vals, shape).to(device)
 
-    def collectRebuildEdges(self, scores, batch_item, batch_index):
+    def initRebuildStats(self):
+        return {
+            'generated_edges': 0,
+            'train_overlap': 0,
+            'top_score_sum': 0.0,
+            'top_score_sq_sum': 0.0,
+            'top_score_count': 0,
+            'graph_hit': 0,
+            'graph_hit_users': 0,
+        }
+
+    def updateGraphHitStats(self, stats, scores, batch_index):
+        hit_k = min(20, scores.size(1))
+        _, hit_indices = torch.topk(scores, k=hit_k)
+        hit_indices = hit_indices.cpu().numpy()
+        batch_index = batch_index.cpu().numpy()
+
+        for row, user in enumerate(batch_index):
+            test_items = self.test_item_sets[int(user)]
+            if not test_items:
+                continue
+            stats['graph_hit_users'] += 1
+            if any(int(item) in test_items for item in hit_indices[row]):
+                stats['graph_hit'] += 1
+
+    def updateRebuildStats(self, stats, scores, batch_item, batch_index, top_scores, indices_, valid_edges):
+        selected_train_edges = batch_item.gather(1, indices_).bool() & valid_edges
+        valid_scores = top_scores[valid_edges]
+
+        stats['generated_edges'] += int(valid_edges.sum().item())
+        stats['train_overlap'] += int(selected_train_edges.sum().item())
+        stats['top_score_count'] += int(valid_scores.numel())
+        if valid_scores.numel() > 0:
+            stats['top_score_sum'] += float(valid_scores.sum().item())
+            stats['top_score_sq_sum'] += float(valid_scores.square().sum().item())
+
+        self.updateGraphHitStats(stats, scores, batch_index)
+
+    def formatRebuildStats(self, modal, stats):
+        generated_edges = stats['generated_edges']
+        train_overlap_ratio = stats['train_overlap'] / generated_edges if generated_edges > 0 else 0.0
+        new_edge_ratio = 1.0 - train_overlap_ratio if generated_edges > 0 else 0.0
+        score_count = stats['top_score_count']
+        top_score_mean = stats['top_score_sum'] / score_count if score_count > 0 else 0.0
+        top_score_var = stats['top_score_sq_sum'] / score_count - top_score_mean ** 2 if score_count > 0 else 0.0
+        top_score_std = float(np.sqrt(max(top_score_var, 0.0)))
+        graph_hit = stats['graph_hit'] / stats['graph_hit_users'] if stats['graph_hit_users'] > 0 else 0.0
+
+        return (
+            'Rebuild %s: rebuild_k = %d, generated_edges = %d, '
+            'train_overlap_ratio = %.6f, new_edge_ratio = %.6f, '
+            'top_score_mean = %.6f, top_score_std = %.6f, graph_hit@20 = %.6f'
+            % (
+                modal,
+                args.rebuild_k,
+                generated_edges,
+                train_overlap_ratio,
+                new_edge_ratio,
+                top_score_mean,
+                top_score_std,
+                graph_hit,
+            )
+        )
+
+    def collectRebuildEdges(self, scores, batch_item, batch_index, stats=None):
         scores = scores.masked_fill(batch_item.bool(), float('-inf'))
         top_k = min(args.rebuild_k, scores.size(1))
         top_scores, indices_ = torch.topk(scores, k=top_k)
@@ -147,6 +215,9 @@ class Coach:
         edge_weights = positive_scores / (positive_scores + 1.0)
         valid_edges = torch.isfinite(top_scores) & (edge_weights > 0)
         batch_users = batch_index.unsqueeze(1).expand_as(indices_)
+
+        if stats is not None:
+            self.updateRebuildStats(stats, scores, batch_item, batch_index, top_scores, indices_, valid_edges)
 
         return (
             batch_users[valid_edges].cpu().numpy(),
@@ -284,15 +355,18 @@ class Coach:
             u_list_image = []
             i_list_image = []
             edge_list_image = []
+            rebuild_stats_image = self.initRebuildStats()
 
             u_list_text = []
             i_list_text = []
             edge_list_text = []
+            rebuild_stats_text = self.initRebuildStats()
 
             if args.data == 'tiktok':
                 u_list_audio = []
                 i_list_audio = []
                 edge_list_audio = []
+                rebuild_stats_audio = self.initRebuildStats()
 
             for _, batch in enumerate(cfmEvalLoader):
                 batch_item, batch_index = batch
@@ -321,14 +395,14 @@ class Coach:
                     denoised_batch_audio = self.flow_matching.euler_solve(self.velocity_model_audio, x_start, steps=args.steps, cond=audio_cond_inf)
 
                 batch_users, batch_items, edge_weights = self.collectRebuildEdges(
-                    denoised_batch_image, batch_item, batch_index
+                    denoised_batch_image, batch_item, batch_index, rebuild_stats_image
                 )
                 u_list_image.append(batch_users)
                 i_list_image.append(batch_items)
                 edge_list_image.append(edge_weights)
 
                 batch_users, batch_items, edge_weights = self.collectRebuildEdges(
-                    denoised_batch_text, batch_item, batch_index
+                    denoised_batch_text, batch_item, batch_index, rebuild_stats_text
                 )
                 u_list_text.append(batch_users)
                 i_list_text.append(batch_items)
@@ -336,11 +410,16 @@ class Coach:
 
                 if args.data == 'tiktok':
                     batch_users, batch_items, edge_weights = self.collectRebuildEdges(
-                        denoised_batch_audio, batch_item, batch_index
+                        denoised_batch_audio, batch_item, batch_index, rebuild_stats_audio
                     )
                     u_list_audio.append(batch_users)
                     i_list_audio.append(batch_items)
                     edge_list_audio.append(edge_weights)
+
+            log(self.formatRebuildStats('image', rebuild_stats_image))
+            log(self.formatRebuildStats('text', rebuild_stats_text))
+            if args.data == 'tiktok':
+                log(self.formatRebuildStats('audio', rebuild_stats_audio))
 
             u_list_image = np.concatenate(u_list_image)
             i_list_image = np.concatenate(i_list_image)
