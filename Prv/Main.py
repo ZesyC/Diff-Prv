@@ -122,12 +122,13 @@ class Coach:
         return mat.dot(dInvSqrtMat).transpose().dot(dInvSqrtMat).tocoo()
 
     def buildUIMatrix(self, u_list, i_list, edge_list):
-        mat = coo_matrix((edge_list, (u_list, i_list)), shape=(args.user, args.item), dtype=np.float32)
+        cfm_mat = coo_matrix((edge_list, (u_list, i_list)), shape=(args.user, args.item), dtype=np.float32).tocsr()
+        train_mat = self.handler.trnMat.tocsr().astype(np.float32)
+        mat = train_mat + cfm_mat.multiply(args.cfm_residual_weight)
 
         a = sp.csr_matrix((args.user, args.user))
         b = sp.csr_matrix((args.item, args.item))
         mat = sp.vstack([sp.hstack([a, mat]), sp.hstack([mat.transpose(), b])])
-        mat = (mat != 0) * 1.0
         mat = (mat + sp.eye(mat.shape[0])) * 1.0
         mat = self.normalizeAdj(mat)
 

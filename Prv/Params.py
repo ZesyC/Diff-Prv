@@ -67,6 +67,7 @@ def ParseArgs():
     parser.add_argument('--sampling_steps', type=int, default=0)
 
     parser.add_argument('--rebuild_k', type=int, default=1, help='top-k edges rebuilt per user/modal')
+    parser.add_argument('--cfm_residual_weight', type=float, default=0.2, help='lambda for residual graph: A_train + lambda * A_cfm')
     parser.add_argument('--e_loss', type=float, default=0.1, help='MSI loss weight')
     parser.add_argument('--ris_lambda', type=float, default=0.5, help='residual item semantic weight')
     parser.add_argument('--ris_adj_lambda', type=float, default=0.2, help='rebuilt adjacency residual weight')
@@ -82,6 +83,8 @@ def ParseArgs():
     parsed = parser.parse_args()
     if parsed.data == 'sport':
         parsed.data = 'sports'
+    if parsed.cfm_residual_weight < 0:
+        parser.error('--cfm_residual_weight must be non-negative')
 
     model_type = _MODEL_ALIASES.get(parsed.model_type.lower())
     if model_type is None:

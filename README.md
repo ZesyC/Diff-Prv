@@ -45,6 +45,7 @@ python .\Prv\Main.py `
   --noise_max 0.02 `
   --sampling_steps 0 `
   --rebuild_k 1 `
+  --cfm_residual_weight 0.2 `
   --e_loss 0.1 `
   --ris_lambda 0.5 `
   --ris_adj_lambda 0.2 `
@@ -86,6 +87,7 @@ python .\Prv\Main.py `
   --noise_max 0.02 `
   --sampling_steps 0 `
   --rebuild_k 1 `
+  --cfm_residual_weight 0.2 `
   --e_loss 0.1 `
   --ris_lambda 0.5 `
   --ris_adj_lambda 0.2 `
@@ -127,6 +129,7 @@ python .\Prv\Main.py `
   --noise_max 0.02 `
   --sampling_steps 0 `
   --rebuild_k 1 `
+  --cfm_residual_weight 0.2 `
   --e_loss 0.1 `
   --ris_lambda 0.5 `
   --ris_adj_lambda 0.2 `
