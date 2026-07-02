@@ -1,7 +1,7 @@
 import pickle
 import numpy as np
 from scipy.sparse import coo_matrix
-from Params import args
+from DiffMM.Params import args
 import scipy.sparse as sp
 import torch
 import torch.utils.data as data
@@ -18,8 +18,6 @@ class DataHandler:
 			predir = './Datasets/sports/'
 		elif args.data == 'tiktok':
 			predir = './Datasets/tiktok/'
-		else:
-			raise ValueError('Unsupported dataset: %s. Expected one of: baby, sports, tiktok.' % args.data)
 		self.predir = predir
 		self.trnfile = predir + 'trnMat.pkl'
 		self.tstfile = predir + 'tstMat.pkl'
@@ -80,8 +78,8 @@ class DataHandler:
 		if args.data == 'tiktok':
 			self.audio_feats, args.audio_feat_dim = self.loadFeatures(self.audiofile)
 
-		self.flowData = FlowData(torch.FloatTensor(self.trnMat.toarray()))
-		self.flowLoader = dataloader.DataLoader(self.flowData, batch_size=args.batch, shuffle=True, num_workers=0)
+		self.diffusionData = DiffusionData(torch.FloatTensor(self.trnMat.A))
+		self.diffusionLoader = dataloader.DataLoader(self.diffusionData, batch_size=args.batch, shuffle=True, num_workers=0)
 
 class TrnData(data.Dataset):
 	def __init__(self, coomat):
@@ -128,7 +126,7 @@ class TstData(data.Dataset):
 	def __getitem__(self, idx):
 		return self.tstUsrs[idx], np.reshape(self.csrmat[self.tstUsrs[idx]].toarray(), [-1])
 	
-class FlowData(data.Dataset):
+class DiffusionData(data.Dataset):
 	def __init__(self, data):
 		self.data = data
 

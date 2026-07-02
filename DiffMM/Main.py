@@ -2,13 +2,14 @@ import torch
 import Utils.TimeLogger as logger
 from Utils.TimeLogger import log
 from Params import args
-from Model import Model, ContrastiveFlowMatching, Denoise
+from Model import Model, GaussianDiffusion, Denoise
 from DataHandler import DataHandler
 import numpy as np
 from Utils.Utils import *
 import os
 import scipy.sparse as sp
 import random
+import setproctitle
 from scipy.sparse import coo_matrix
 
 class Coach:
@@ -67,23 +68,23 @@ class Coach:
 			self.model = Model(self.handler.image_feats.detach(), self.handler.text_feats.detach()).cuda()
 		self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
 
-		self.flow_matching = ContrastiveFlowMatching(args.steps, args.noise_scale, args.temp)
+		self.diffusion_model = GaussianDiffusion(args.noise_scale, args.noise_min, args.noise_max, args.steps).cuda()
 		
 		out_dims = eval(args.dims) + [args.item]
 		in_dims = out_dims[::-1]
-		self.flow_model_image = Denoise(in_dims, out_dims, args.d_emb_size, norm=args.norm).cuda()
-		self.flow_opt_image = torch.optim.Adam(self.flow_model_image.parameters(), lr=args.lr, weight_decay=0)
+		self.denoise_model_image = Denoise(in_dims, out_dims, args.d_emb_size, norm=args.norm).cuda()
+		self.denoise_opt_image = torch.optim.Adam(self.denoise_model_image.parameters(), lr=args.lr, weight_decay=0)
 
 		out_dims = eval(args.dims) + [args.item]
 		in_dims = out_dims[::-1]
-		self.flow_model_text = Denoise(in_dims, out_dims, args.d_emb_size, norm=args.norm).cuda()
-		self.flow_opt_text = torch.optim.Adam(self.flow_model_text.parameters(), lr=args.lr, weight_decay=0)
+		self.denoise_model_text = Denoise(in_dims, out_dims, args.d_emb_size, norm=args.norm).cuda()
+		self.denoise_opt_text = torch.optim.Adam(self.denoise_model_text.parameters(), lr=args.lr, weight_decay=0)
 
 		if args.data == 'tiktok':
 			out_dims = eval(args.dims) + [args.item]
 			in_dims = out_dims[::-1]
-			self.flow_model_audio = Denoise(in_dims, out_dims, args.d_emb_size, norm=args.norm).cuda()
-			self.flow_opt_audio = torch.optim.Adam(self.flow_model_audio.parameters(), lr=args.lr, weight_decay=0)
+			self.denoise_model_audio = Denoise(in_dims, out_dims, args.d_emb_size, norm=args.norm).cuda()
+			self.denoise_opt_audio = torch.optim.Adam(self.denoise_model_audio.parameters(), lr=args.lr, weight_decay=0)
 
 	def normalizeAdj(self, mat): 
 		degree = np.array(mat.sum(axis=-1))
@@ -112,49 +113,46 @@ class Coach:
 		trnLoader = self.handler.trnLoader
 		trnLoader.dataset.negSampling()
 		epLoss, epRecLoss, epClLoss = 0, 0, 0
-		epFlowLoss_image, epFlowLoss_text = 0, 0
-		epCfmLoss_image, epCfmLoss_text = 0, 0
+		epDiLoss = 0
+		epDiLoss_image, epDiLoss_text = 0, 0
 		if args.data == 'tiktok':
-			epFlowLoss_audio = 0
-			epCfmLoss_audio = 0
-		steps = len(trnLoader)
+			epDiLoss_audio = 0
+		steps = trnLoader.dataset.__len__() // args.batch
 
-		flowLoader = self.handler.flowLoader
-		flow_steps = len(flowLoader)
+		diffusionLoader = self.handler.diffusionLoader
 
-		for i, batch in enumerate(flowLoader):
+		for i, batch in enumerate(diffusionLoader):
 			batch_item, batch_index = batch
 			batch_item, batch_index = batch_item.cuda(), batch_index.cuda()
 
 			iEmbeds = self.model.getItemEmbeds().detach()
+			uEmbeds = self.model.getUserEmbeds().detach()
 
-			image_feats = self.model.getImageFeats().detach()
-			text_feats = self.model.getTextFeats().detach()
+			modal_feats = self.model.getModalFeats()
+			image_feats = modal_feats[0].detach()
+			text_feats = modal_feats[1].detach()
 			if args.data == 'tiktok':
-				audio_feats = self.model.getAudioFeats().detach()
+				audio_feats = modal_feats[2].detach()
 
-			self.flow_opt_image.zero_grad()
-			self.flow_opt_text.zero_grad()
+			self.denoise_opt_image.zero_grad()
+			self.denoise_opt_text.zero_grad()
 			if args.data == 'tiktok':
-				self.flow_opt_audio.zero_grad()
+				self.denoise_opt_audio.zero_grad()
 
-			flow_loss_image, gc_loss_image, cfm_loss_image = self.flow_matching.training_losses(self.flow_model_image, batch_item, iEmbeds, batch_index, image_feats)
-			flow_loss_text, gc_loss_text, cfm_loss_text = self.flow_matching.training_losses(self.flow_model_text, batch_item, iEmbeds, batch_index, text_feats)
+			diff_loss_image, gc_loss_image = self.diffusion_model.training_losses(self.denoise_model_image, batch_item, iEmbeds, batch_index, image_feats)
+			diff_loss_text, gc_loss_text = self.diffusion_model.training_losses(self.denoise_model_text, batch_item, iEmbeds, batch_index, text_feats)
 			if args.data == 'tiktok':
-				flow_loss_audio, gc_loss_audio, cfm_loss_audio = self.flow_matching.training_losses(self.flow_model_audio, batch_item, iEmbeds, batch_index, audio_feats)
+				diff_loss_audio, gc_loss_audio = self.diffusion_model.training_losses(self.denoise_model_audio, batch_item, iEmbeds, batch_index, audio_feats)
 
-			loss_image = flow_loss_image.mean() + gc_loss_image.mean() * args.e_loss + cfm_loss_image * args.cfm_reg
-			loss_text = flow_loss_text.mean() + gc_loss_text.mean() * args.e_loss + cfm_loss_text * args.cfm_reg
+			loss_image = diff_loss_image.mean() + gc_loss_image.mean() * args.e_loss
+			loss_text = diff_loss_text.mean() + gc_loss_text.mean() * args.e_loss
 			if args.data == 'tiktok':
-				loss_audio = flow_loss_audio.mean() + gc_loss_audio.mean() * args.e_loss + cfm_loss_audio * args.cfm_reg
+				loss_audio = diff_loss_audio.mean() + gc_loss_audio.mean() * args.e_loss
 
-			epFlowLoss_image += loss_image.item()
-			epFlowLoss_text += loss_text.item()
-			epCfmLoss_image += cfm_loss_image.item()
-			epCfmLoss_text += cfm_loss_text.item()
+			epDiLoss_image += loss_image.item()
+			epDiLoss_text += loss_text.item()
 			if args.data == 'tiktok':
-				epFlowLoss_audio += loss_audio.item()
-				epCfmLoss_audio += cfm_loss_audio.item()
+				epDiLoss_audio += loss_audio.item()
 
 			if args.data == 'tiktok':
 				loss = loss_image + loss_text + loss_audio
@@ -163,12 +161,12 @@ class Coach:
 
 			loss.backward()
 
-			self.flow_opt_image.step()
-			self.flow_opt_text.step()
+			self.denoise_opt_image.step()
+			self.denoise_opt_text.step()
 			if args.data == 'tiktok':
-				self.flow_opt_audio.step()
+				self.denoise_opt_audio.step()
 
-			log('CFM Step %d/%d' % (i, flow_steps), save=False, oneline=True)
+			log('Diffusion Step %d/%d' % (i, diffusionLoader.dataset.__len__() // args.batch), save=False, oneline=True)
 
 		log('')
 		log('Start to re-build UI matrix')
@@ -188,13 +186,13 @@ class Coach:
 				i_list_audio = []
 				edge_list_audio = []
 
-			for _, batch in enumerate(flowLoader):
+			for _, batch in enumerate(diffusionLoader):
 				batch_item, batch_index = batch
 				batch_item, batch_index = batch_item.cuda(), batch_index.cuda()
 
 				# image
-				flow_batch = self.flow_matching.sample(self.flow_model_image, batch_item, args.sampling_steps, args.sampling_noise)
-				top_item, indices_ = torch.topk(flow_batch, k=args.rebuild_k)
+				denoised_batch = self.diffusion_model.p_sample(self.denoise_model_image, batch_item, args.sampling_steps, args.sampling_noise)
+				top_item, indices_ = torch.topk(denoised_batch, k=args.rebuild_k)
 
 				for i in range(batch_index.shape[0]):
 					for j in range(indices_[i].shape[0]): 
@@ -203,8 +201,8 @@ class Coach:
 						edge_list_image.append(1.0)
 
 				# text
-				flow_batch = self.flow_matching.sample(self.flow_model_text, batch_item, args.sampling_steps, args.sampling_noise)
-				top_item, indices_ = torch.topk(flow_batch, k=args.rebuild_k)
+				denoised_batch = self.diffusion_model.p_sample(self.denoise_model_text, batch_item, args.sampling_steps, args.sampling_noise)
+				top_item, indices_ = torch.topk(denoised_batch, k=args.rebuild_k)
 
 				for i in range(batch_index.shape[0]):
 					for j in range(indices_[i].shape[0]): 
@@ -214,8 +212,8 @@ class Coach:
 
 				if args.data == 'tiktok':
 					# audio
-					flow_batch = self.flow_matching.sample(self.flow_model_audio, batch_item, args.sampling_steps, args.sampling_noise)
-					top_item, indices_ = torch.topk(flow_batch, k=args.rebuild_k)
+					denoised_batch = self.diffusion_model.p_sample(self.denoise_model_audio, batch_item, args.sampling_steps, args.sampling_noise)
+					top_item, indices_ = torch.topk(denoised_batch, k=args.rebuild_k)
 
 					for i in range(batch_index.shape[0]):
 						for j in range(indices_[i].shape[0]): 
@@ -311,13 +309,10 @@ class Coach:
 		ret['Loss'] = epLoss / steps
 		ret['BPR Loss'] = epRecLoss / steps
 		ret['CL loss'] = epClLoss / steps
-		ret['Flow image loss'] = epFlowLoss_image / flow_steps
-		ret['Flow text loss'] = epFlowLoss_text / flow_steps
-		ret['CFM image cl'] = epCfmLoss_image / flow_steps
-		ret['CFM text cl'] = epCfmLoss_text / flow_steps
+		ret['Di image loss'] = epDiLoss_image / (diffusionLoader.dataset.__len__() // args.batch)
+		ret['Di text loss'] = epDiLoss_text / (diffusionLoader.dataset.__len__() // args.batch)
 		if args.data == 'tiktok':
-			ret['Flow audio loss'] = epFlowLoss_audio / flow_steps
-			ret['CFM audio cl'] = epCfmLoss_audio / flow_steps
+			ret['Di audio loss'] = epDiLoss_audio / (diffusionLoader.dataset.__len__() // args.batch)
 		return ret
 
 	def testEpoch(self):

@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from Params import args
+from DiffMM.Params import args
 import numpy as np
 import random
 import math
@@ -9,6 +9,39 @@ from Utils.Utils import *
 
 init = nn.init.xavier_uniform_
 uniformInit = nn.init.uniform
+
+class CrossModalAttention(nn.Module):
+	def __init__(self, latdim, num_heads):
+		super(CrossModalAttention, self).__init__()
+		if latdim % num_heads != 0:
+			raise ValueError('cross_heads must divide latdim')
+		self.attn = nn.MultiheadAttention(latdim, num_heads, batch_first=True)
+		self.norm = nn.LayerNorm(latdim)
+
+	def forward(self, feats):
+		modal_tokens = torch.stack(feats, dim=1)
+		attn_tokens, _ = self.attn(modal_tokens, modal_tokens, modal_tokens, need_weights=False)
+		attn_tokens = self.norm(modal_tokens + attn_tokens)
+		return [attn_tokens[:, i, :] for i in range(attn_tokens.shape[1])]
+
+class ModalityInteraction(nn.Module):
+	def __init__(self, latdim):
+		super(ModalityInteraction, self).__init__()
+		self.gate = nn.Linear(latdim * 2, latdim)
+		self.norm = nn.LayerNorm(latdim)
+
+	def forward(self, feats):
+		if len(feats) < 2:
+			return feats
+
+		stacked_feats = torch.stack(feats, dim=1)
+		sum_feats = stacked_feats.sum(dim=1)
+		interacted_feats = []
+		for i, feat in enumerate(feats):
+			context = (sum_feats - feat) / (len(feats) - 1)
+			gate = torch.sigmoid(self.gate(torch.cat([feat, context], dim=-1)))
+			interacted_feats.append(self.norm(feat + gate * context))
+		return interacted_feats
 
 class Model(nn.Module):
 	def __init__(self, image_embedding, text_embedding, audio_embedding=None):
@@ -51,53 +84,66 @@ class Model(nn.Module):
 		self.dropout = nn.Dropout(p=0.1)
 
 		self.leakyrelu = nn.LeakyReLU(0.2)
+		self.cross_attention = CrossModalAttention(args.latdim, args.cross_heads) if args.use_cross_attention else None
+		self.modality_interaction = ModalityInteraction(args.latdim) if args.use_modality_interaction else None
 				
 	def getItemEmbeds(self):
 		return self.iEmbeds
 	
 	def getUserEmbeds(self):
 		return self.uEmbeds
-	
-	def getImageFeats(self):
+
+	def _project_modal_feats(self):
 		if args.trans == 0 or args.trans == 2:
 			image_feats = self.leakyrelu(torch.mm(self.image_embedding, self.image_trans))
-			return image_feats
 		else:
-			return self.image_trans(self.image_embedding)
-	
-	def getTextFeats(self):
+			image_feats = self.image_trans(self.image_embedding)
+
 		if args.trans == 0:
 			text_feats = self.leakyrelu(torch.mm(self.text_embedding, self.text_trans))
-			return text_feats
 		else:
-			return self.text_trans(self.text_embedding)
+			text_feats = self.text_trans(self.text_embedding)
+
+		feats = [image_feats, text_feats]
+		if self.audio_embedding != None:
+			if args.trans == 0:
+				audio_feats = self.leakyrelu(torch.mm(self.audio_embedding, self.audio_trans))
+			else:
+				audio_feats = self.audio_trans(self.audio_embedding)
+			feats.append(audio_feats)
+
+		return feats
+
+	def _get_modal_feats(self):
+		feats = self._project_modal_feats()
+		if self.cross_attention is not None:
+			attn_feats = self.cross_attention(feats)
+			feats = [feat + args.cross_lambda * (attn_feat - feat) for feat, attn_feat in zip(feats, attn_feats)]
+		if self.modality_interaction is not None:
+			interacted_feats = self.modality_interaction(feats)
+			feats = [feat + args.cross_lambda * (interacted_feat - feat) for feat, interacted_feat in zip(feats, interacted_feats)]
+		return feats
+
+	def getModalFeats(self):
+		return self._get_modal_feats()
+	
+	def getImageFeats(self):
+		return self._get_modal_feats()[0]
+	
+	def getTextFeats(self):
+		return self._get_modal_feats()[1]
 
 	def getAudioFeats(self):
 		if self.audio_embedding == None:
 			return None
-		else:
-			if args.trans == 0:
-				audio_feats = self.leakyrelu(torch.mm(self.audio_embedding, self.audio_trans))
-			else:
-				audio_feats = self.audio_trans(self.audio_embedding)
-		return audio_feats
+		return self._get_modal_feats()[2]
 
 	def forward_MM(self, adj, image_adj, text_adj, audio_adj=None):
-		if args.trans == 0:
-			image_feats = self.leakyrelu(torch.mm(self.image_embedding, self.image_trans))
-			text_feats = self.leakyrelu(torch.mm(self.text_embedding, self.text_trans))
-		elif args.trans == 1:
-			image_feats = self.image_trans(self.image_embedding)
-			text_feats = self.text_trans(self.text_embedding)
-		else:
-			image_feats = self.leakyrelu(torch.mm(self.image_embedding, self.image_trans))
-			text_feats = self.text_trans(self.text_embedding)
-
+		modal_feats = self._get_modal_feats()
+		image_feats = modal_feats[0]
+		text_feats = modal_feats[1]
 		if audio_adj != None:
-			if args.trans == 0:
-				audio_feats = self.leakyrelu(torch.mm(self.audio_embedding, self.audio_trans))
-			else:
-				audio_feats = self.audio_trans(self.audio_embedding)
+			audio_feats = modal_feats[2]
 
 		weight = self.softmax(self.modal_weight)
 
@@ -153,21 +199,11 @@ class Model(nn.Module):
 		return embeds[:args.user], embeds[args.user:]
 
 	def forward_cl_MM(self, adj, image_adj, text_adj, audio_adj=None):
-		if args.trans == 0:
-			image_feats = self.leakyrelu(torch.mm(self.image_embedding, self.image_trans))
-			text_feats = self.leakyrelu(torch.mm(self.text_embedding, self.text_trans))
-		elif args.trans == 1:
-			image_feats = self.image_trans(self.image_embedding)
-			text_feats = self.text_trans(self.text_embedding)
-		else:
-			image_feats = self.leakyrelu(torch.mm(self.image_embedding, self.image_trans))
-			text_feats = self.text_trans(self.text_embedding)
-
+		modal_feats = self._get_modal_feats()
+		image_feats = modal_feats[0]
+		text_feats = modal_feats[1]
 		if audio_adj != None:
-			if args.trans == 0:
-				audio_feats = self.leakyrelu(torch.mm(self.audio_embedding, self.audio_trans))
-			else:
-				audio_feats = self.audio_trans(self.audio_embedding)
+			audio_feats = modal_feats[2]
 
 		embedsImage = torch.concat([self.uEmbeds, F.normalize(image_feats)])
 		embedsImage = torch.spmm(image_adj, embedsImage)
@@ -228,12 +264,12 @@ class SpAdjDropEdge(nn.Module):
 		vals = adj._values()
 		idxs = adj._indices()
 		edgeNum = vals.size()
-		mask = ((torch.rand(edgeNum, device=vals.device) + self.keepRate).floor()).type(torch.bool)
+		mask = ((torch.rand(edgeNum) + self.keepRate).floor()).type(torch.bool)
 
 		newVals = vals[mask] / self.keepRate
 		newIdxs = idxs[:, mask]
 
-		return torch.sparse.FloatTensor(newIdxs, newVals, adj.shape).to(adj.device)
+		return torch.sparse.FloatTensor(newIdxs, newVals, adj.shape)
 		
 class Denoise(nn.Module):
 	def __init__(self, in_dims, out_dims, emb_size, norm=False, dropout=0.5):
@@ -274,11 +310,7 @@ class Denoise(nn.Module):
 		self.emb_layer.bias.data.normal_(0.0, 0.001)
 
 	def forward(self, x, timesteps, mess_dropout=True):
-		freqs = torch.exp(
-			-math.log(10000)
-			* torch.arange(start=0, end=self.time_emb_dim//2, dtype=torch.float32, device=x.device)
-			/ (self.time_emb_dim//2)
-		)
+		freqs = torch.exp(-math.log(10000) * torch.arange(start=0, end=self.time_emb_dim//2, dtype=torch.float32) / (self.time_emb_dim//2)).cuda()
 		temp = timesteps[:, None].float() * freqs[None]
 		time_emb = torch.cat([torch.cos(temp), torch.sin(temp)], dim=-1)
 		if self.time_emb_dim % 2:
@@ -298,77 +330,6 @@ class Denoise(nn.Module):
 				h = torch.tanh(h)
 
 		return h
-
-class ContrastiveFlowMatching(nn.Module):
-	def __init__(self, steps, source_noise_scale, temp):
-		super(ContrastiveFlowMatching, self).__init__()
-		self.steps = steps
-		self.source_noise_scale = source_noise_scale
-		self.temp = temp
-
-	def sample_source(self, x_target):
-		if self.source_noise_scale == 0:
-			return x_target
-		# Keep the source user-conditioned because this model has no separate user-id condition.
-		return x_target + torch.randn_like(x_target) * self.source_noise_scale
-
-	def training_losses(self, model, x_target, itmEmbeds, batch_index, model_feats):
-		batch_size = x_target.size(0)
-		device = x_target.device
-		t = torch.rand(batch_size, device=device)
-
-		x_source = self.sample_source(x_target)
-		target_velocity = x_target - x_source
-		expand_t = t.view(-1, *([1] * (len(x_target.shape) - 1)))
-		x_t = (1 - expand_t) * x_source + expand_t * x_target
-
-		pred_velocity = model(x_t, self.time_condition(t))
-		fm_loss = self.mean_flat((pred_velocity - target_velocity) ** 2)
-
-		x_target_pred = x_t + (1 - expand_t) * pred_velocity
-		usr_model_embeds = torch.mm(x_target_pred, model_feats)
-		usr_id_embeds = torch.mm(x_target, itmEmbeds)
-		gc_loss = self.graph_consistency_loss(usr_model_embeds, usr_id_embeds)
-		cfm_loss = self.contrastive_flow_loss(pred_velocity, target_velocity)
-
-		return fm_loss, gc_loss, cfm_loss
-
-	def sample(self, model, x_start, steps=0, sampling_noise=False):
-		sample_steps = self.steps if steps <= 0 else steps
-		sample_steps = max(sample_steps, 1)
-		x_t = self.sample_source(x_start) if sampling_noise else x_start.clone()
-		dt = 1.0 / sample_steps
-
-		for step in range(sample_steps):
-			t = torch.full((x_t.size(0),), step / sample_steps, device=x_t.device)
-			velocity = model(x_t, self.time_condition(t), False)
-			x_t = x_t + dt * velocity
-		return x_t
-
-	def graph_consistency_loss(self, pred_embeds, target_embeds):
-		return self.mean_flat((pred_embeds - target_embeds) ** 2)
-
-	def contrastive_flow_loss(self, pred_velocity, target_velocity):
-		if pred_velocity.size(0) <= 1:
-			return pred_velocity.new_tensor(0.0)
-
-		batch_size = pred_velocity.size(0)
-		indices = torch.arange(batch_size, device=pred_velocity.device)
-		negative_indices = torch.randperm(batch_size, device=pred_velocity.device)
-		negative_indices = torch.where(
-			negative_indices == indices,
-			(negative_indices + 1) % batch_size,
-			negative_indices,
-		)
-		negative_velocity = target_velocity[negative_indices]
-		negative_loss = self.mean_flat((pred_velocity - negative_velocity) ** 2)
-		return -negative_loss.mean()
-
-	def time_condition(self, t):
-		return t * max(self.steps, 1)
-
-	def mean_flat(self, tensor):
-		return tensor.mean(dim=list(range(1, len(tensor.shape))))
 
 class GaussianDiffusion(nn.Module):
 	def __init__(self, noise_scale, noise_min, noise_max, steps, beta_fixed=True):

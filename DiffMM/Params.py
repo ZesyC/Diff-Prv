@@ -1,15 +1,5 @@
 import argparse
 
-def str2bool(value):
-	if isinstance(value, bool):
-		return value
-	value = value.lower()
-	if value in ('yes', 'true', 't', '1', 'y'):
-		return True
-	if value in ('no', 'false', 'f', '0', 'n'):
-		return False
-	raise argparse.ArgumentTypeError('Boolean value expected.')
-
 def ParseArgs():
 	parser = argparse.ArgumentParser(description='Model Params')
 	parser.add_argument('--lr', default=1e-3, type=float, help='learning rate')
@@ -31,20 +21,23 @@ def ParseArgs():
 	
 	parser.add_argument('--dims', type=str, default='[1000]')
 	parser.add_argument('--d_emb_size', type=int, default=10)
-	parser.add_argument('--norm', type=str2bool, default=False)
-	parser.add_argument('--steps', type=int, default=5, help='number of Euler steps for contrastive flow matching')
-	parser.add_argument('--noise_scale', type=float, default=0.1, help='source noise scale for contrastive flow matching')
-	parser.add_argument('--noise_min', type=float, default=0.0001, help='deprecated diffusion arg; kept for old configs')
-	parser.add_argument('--noise_max', type=float, default=0.02, help='deprecated diffusion arg; kept for old configs')
-	parser.add_argument('--sampling_noise', type=str2bool, default=False, help='whether to add source noise before flow sampling')
-	parser.add_argument('--sampling_steps', type=int, default=0, help='Euler sampling steps; 0 uses --steps')
+	parser.add_argument('--norm', type=bool, default=False)
+	parser.add_argument('--steps', type=int, default=5)
+	parser.add_argument('--noise_scale', type=float, default=0.1)
+	parser.add_argument('--noise_min', type=float, default=0.0001)
+	parser.add_argument('--noise_max', type=float, default=0.02)
+	parser.add_argument('--sampling_noise', type=bool, default=False)
+	parser.add_argument('--sampling_steps', type=int, default=0)
 
 	parser.add_argument('--rebuild_k', type=int, default=1)
 	parser.add_argument('--e_loss', type=float, default=0.1)
-	parser.add_argument('--cfm_reg', type=float, default=0.1, help='weight for contrastive flow matching loss')
 	parser.add_argument('--ris_lambda', type=float, default=0.5)
 	parser.add_argument('--ris_adj_lambda', type=float, default=0.2)
 	parser.add_argument('--trans', type=int, default=0, help='0: R*R, 1: Linear, 2: allrecipes')
 	parser.add_argument('--cl_method', type=int, default=0, help='0:m vs m ; 1:m vs main')
+	parser.add_argument('--use_cross_attention', type=int, default=0, help='1: enable item-level cross-modal attention')
+	parser.add_argument('--use_modality_interaction', type=int, default=0, help='1: enable gated modality interaction')
+	parser.add_argument('--cross_lambda', type=float, default=0.2, help='strength of cross-modal feature update')
+	parser.add_argument('--cross_heads', type=int, default=1, help='number of heads in cross-modal attention')
 	return parser.parse_args()
 args = ParseArgs()

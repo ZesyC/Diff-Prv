@@ -5,17 +5,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import Utils.TimeLogger as logger
 from Utils.TimeLogger import log
 from Params import args
-from Model import Model, GCNLayer, SpAdjDropEdge
+from Model import Model
 from DataHandler import DataHandler
 from VelocityModel import VelocityModel
 from FlowMatching import GraphFlowMatching
-from Diffusion import GaussianDiffusion, FlowMatching_Original, Denoise
 import numpy as np
 from Utils.Utils import *
 import os
 import scipy.sparse as sp
 import random
-import setproctitle
 from scipy.sparse import coo_matrix
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -82,32 +80,17 @@ class Coach:
             self.model = Model(self.handler.image_feats.detach(), self.handler.text_feats.detach()).to(device)
         self.opt = torch.optim.Adam(self.model.parameters(), lr=args.lr, weight_decay=0)
 
-        if args.model_type == 'flowmatching_optimized':
-            self.flow_matching = GraphFlowMatching(sigma_min=1e-4).to(device)
-            out_dims = eval(args.dims) + [args.item]
-            in_dims = out_dims[::-1]
-            self.velocity_model_image = VelocityModel(in_dims, out_dims, args.d_emb_size, norm=args.norm).to(device)
-            self.velocity_opt_image = torch.optim.Adam(self.velocity_model_image.parameters(), lr=args.lr, weight_decay=0)
-            self.velocity_model_text = VelocityModel(in_dims, out_dims, args.d_emb_size, norm=args.norm).to(device)
-            self.velocity_opt_text = torch.optim.Adam(self.velocity_model_text.parameters(), lr=args.lr, weight_decay=0)
-            if args.data == 'tiktok':
-                self.velocity_model_audio = VelocityModel(in_dims, out_dims, args.d_emb_size, norm=args.norm).to(device)
-                self.velocity_opt_audio = torch.optim.Adam(self.velocity_model_audio.parameters(), lr=args.lr, weight_decay=0)
-        else:
-            if args.model_type == 'flowmatching_original':
-                self.diffusion_model = FlowMatching_Original(args.steps).to(device)
-            else:
-                self.diffusion_model = GaussianDiffusion(args.noise_scale, args.noise_min, args.noise_max, args.steps).to(device)
-            
-            out_dims = eval(args.dims) + [args.item]
-            in_dims = out_dims[::-1]
-            self.denoise_model_image = Denoise(in_dims, out_dims, args.d_emb_size, norm=args.norm).to(device)
-            self.denoise_opt_image = torch.optim.Adam(self.denoise_model_image.parameters(), lr=args.lr, weight_decay=0)
-            self.denoise_model_text = Denoise(in_dims, out_dims, args.d_emb_size, norm=args.norm).to(device)
-            self.denoise_opt_text = torch.optim.Adam(self.denoise_model_text.parameters(), lr=args.lr, weight_decay=0)
-            if args.data == 'tiktok':
-                self.denoise_model_audio = Denoise(in_dims, out_dims, args.d_emb_size, norm=args.norm).to(device)
-                self.denoise_opt_audio = torch.optim.Adam(self.denoise_model_audio.parameters(), lr=args.lr, weight_decay=0)
+        self.flow_matching = GraphFlowMatching(sigma_min=1e-4).to(device)
+        out_dims = eval(args.dims) + [args.item]
+        in_dims = out_dims[::-1]
+        cond_dim = args.latdim * 3
+        self.velocity_model_image = VelocityModel(in_dims, out_dims, args.d_emb_size, norm=args.norm, cond_dim=cond_dim).to(device)
+        self.velocity_opt_image = torch.optim.Adam(self.velocity_model_image.parameters(), lr=args.lr, weight_decay=0)
+        self.velocity_model_text = VelocityModel(in_dims, out_dims, args.d_emb_size, norm=args.norm, cond_dim=cond_dim).to(device)
+        self.velocity_opt_text = torch.optim.Adam(self.velocity_model_text.parameters(), lr=args.lr, weight_decay=0)
+        if args.data == 'tiktok':
+            self.velocity_model_audio = VelocityModel(in_dims, out_dims, args.d_emb_size, norm=args.norm, cond_dim=cond_dim).to(device)
+            self.velocity_opt_audio = torch.optim.Adam(self.velocity_model_audio.parameters(), lr=args.lr, weight_decay=0)
 
     def normalizeAdj(self, mat): 
         degree = np.array(mat.sum(axis=-1))
@@ -136,15 +119,14 @@ class Coach:
         trnLoader = self.handler.trnLoader
         trnLoader.dataset.negSampling()
         epLoss, epRecLoss, epClLoss = 0, 0, 0
-        epDiLoss = 0
         epDiLoss_image, epDiLoss_text = 0, 0
         if args.data == 'tiktok':
             epDiLoss_audio = 0
         steps = trnLoader.dataset.__len__() // args.batch
 
-        diffusionLoader = self.handler.diffusionLoader
+        cfmLoader = self.handler.cfmLoader
 
-        for i, batch in enumerate(diffusionLoader):
+        for i, batch in enumerate(cfmLoader):
             batch_item, batch_index = batch
             batch_item, batch_index = batch_item.to(device), batch_index.to(device)
 
@@ -156,36 +138,20 @@ class Coach:
             if args.data == 'tiktok':
                 audio_feats = self.model.getAudioFeats().detach()
 
-            if args.model_type == 'flowmatching_optimized':
-                self.velocity_opt_image.zero_grad()
-                self.velocity_opt_text.zero_grad()
-                if args.data == 'tiktok':
-                    self.velocity_opt_audio.zero_grad()
+            self.velocity_opt_image.zero_grad()
+            self.velocity_opt_text.zero_grad()
+            if args.data == 'tiktok':
+                self.velocity_opt_audio.zero_grad()
 
-                cfm_loss_image, msi_loss_image = self.flow_matching.training_losses(self.velocity_model_image, batch_item, iEmbeds, batch_index, image_feats)
-                cfm_loss_text, msi_loss_text = self.flow_matching.training_losses(self.velocity_model_text, batch_item, iEmbeds, batch_index, text_feats)
-                if args.data == 'tiktok':
-                    cfm_loss_audio, msi_loss_audio = self.flow_matching.training_losses(self.velocity_model_audio, batch_item, iEmbeds, batch_index, audio_feats)
+            cfm_loss_image, msi_loss_image = self.flow_matching.training_losses(self.velocity_model_image, batch_item, iEmbeds, uEmbeds, batch_index, image_feats)
+            cfm_loss_text, msi_loss_text = self.flow_matching.training_losses(self.velocity_model_text, batch_item, iEmbeds, uEmbeds, batch_index, text_feats)
+            if args.data == 'tiktok':
+                cfm_loss_audio, msi_loss_audio = self.flow_matching.training_losses(self.velocity_model_audio, batch_item, iEmbeds, uEmbeds, batch_index, audio_feats)
 
-                loss_image = cfm_loss_image.mean() + msi_loss_image.mean() * args.e_loss
-                loss_text = cfm_loss_text.mean() + msi_loss_text.mean() * args.e_loss
-                if args.data == 'tiktok':
-                    loss_audio = cfm_loss_audio.mean() + msi_loss_audio.mean() * args.e_loss
-            else:
-                self.denoise_opt_image.zero_grad()
-                self.denoise_opt_text.zero_grad()
-                if args.data == 'tiktok':
-                    self.denoise_opt_audio.zero_grad()
-
-                diff_loss_image, gc_loss_image = self.diffusion_model.training_losses(self.denoise_model_image, batch_item, iEmbeds, batch_index, image_feats)
-                diff_loss_text, gc_loss_text = self.diffusion_model.training_losses(self.denoise_model_text, batch_item, iEmbeds, batch_index, text_feats)
-                if args.data == 'tiktok':
-                    diff_loss_audio, gc_loss_audio = self.diffusion_model.training_losses(self.denoise_model_audio, batch_item, iEmbeds, batch_index, audio_feats)
-
-                loss_image = diff_loss_image.mean() + gc_loss_image.mean() * args.e_loss
-                loss_text = diff_loss_text.mean() + gc_loss_text.mean() * args.e_loss
-                if args.data == 'tiktok':
-                    loss_audio = diff_loss_audio.mean() + gc_loss_audio.mean() * args.e_loss
+            loss_image = cfm_loss_image.mean() + msi_loss_image.mean() * args.e_loss
+            loss_text = cfm_loss_text.mean() + msi_loss_text.mean() * args.e_loss
+            if args.data == 'tiktok':
+                loss_audio = cfm_loss_audio.mean() + msi_loss_audio.mean() * args.e_loss
 
             epDiLoss_image += loss_image.item()
             epDiLoss_text += loss_text.item()
@@ -199,18 +165,11 @@ class Coach:
 
             loss.backward()
 
-            if args.model_type == 'flowmatching_optimized':
-                self.velocity_opt_image.step()
-                self.velocity_opt_text.step()
-                if args.data == 'tiktok':
-                    self.velocity_opt_audio.step()
-                log('FlowMatching Step %d/%d' % (i, diffusionLoader.dataset.__len__() // args.batch), save=False, oneline=True)
-            else:
-                self.denoise_opt_image.step()
-                self.denoise_opt_text.step()
-                if args.data == 'tiktok':
-                    self.denoise_opt_audio.step()
-                log('Diffusion Step %d/%d' % (i, diffusionLoader.dataset.__len__() // args.batch), save=False, oneline=True)
+            self.velocity_opt_image.step()
+            self.velocity_opt_text.step()
+            if args.data == 'tiktok':
+                self.velocity_opt_audio.step()
+            log('CFM Step %d/%d' % (i, cfmLoader.dataset.__len__() // args.batch), save=False, oneline=True)
 
         log('')
         log('Start to re-build UI matrix using Euler Solver')
@@ -230,21 +189,21 @@ class Coach:
                 i_list_audio = []
                 edge_list_audio = []
 
-            for _, batch in enumerate(diffusionLoader):
+            for _, batch in enumerate(cfmLoader):
                 batch_item, batch_index = batch
                 batch_item, batch_index = batch_item.to(device), batch_index.to(device)
 
-                if args.model_type == 'flowmatching_optimized':
-                    x_start = torch.randn_like(batch_item)
-                    denoised_batch_image = self.flow_matching.euler_solve(self.velocity_model_image, x_start, steps=args.steps)
-                    denoised_batch_text = self.flow_matching.euler_solve(self.velocity_model_text, x_start, steps=args.steps)
-                    if args.data == 'tiktok':
-                        denoised_batch_audio = self.flow_matching.euler_solve(self.velocity_model_audio, x_start, steps=args.steps)
-                else:
-                    denoised_batch_image = self.diffusion_model.p_sample(self.denoise_model_image, batch_item, args.sampling_steps, args.sampling_noise)
-                    denoised_batch_text = self.diffusion_model.p_sample(self.denoise_model_text, batch_item, args.sampling_steps, args.sampling_noise)
-                    if args.data == 'tiktok':
-                        denoised_batch_audio = self.diffusion_model.p_sample(self.denoise_model_audio, batch_item, args.sampling_steps, args.sampling_noise)
+                uEmbeds = self.model.getUserEmbeds().detach()
+                image_feats = self.model.getImageFeats().detach()
+                text_feats = self.model.getTextFeats().detach()
+                if args.data == 'tiktok':
+                    audio_feats = self.model.getAudioFeats().detach()
+
+                x_start = torch.randn_like(batch_item)
+                denoised_batch_image = self.flow_matching.euler_solve(self.velocity_model_image, x_start, batch_item, uEmbeds, batch_index, image_feats, steps=args.steps)
+                denoised_batch_text = self.flow_matching.euler_solve(self.velocity_model_text, x_start, batch_item, uEmbeds, batch_index, text_feats, steps=args.steps)
+                if args.data == 'tiktok':
+                    denoised_batch_audio = self.flow_matching.euler_solve(self.velocity_model_audio, x_start, batch_item, uEmbeds, batch_index, audio_feats, steps=args.steps)
 
                 top_item, indices_ = torch.topk(denoised_batch_image, k=args.rebuild_k)
                 for i in range(batch_index.shape[0]):
@@ -356,10 +315,10 @@ class Coach:
         ret['Loss'] = epLoss / steps
         ret['BPR Loss'] = epRecLoss / steps
         ret['CL loss'] = epClLoss / steps
-        ret['CFM image loss'] = epDiLoss_image / (diffusionLoader.dataset.__len__() // args.batch)
-        ret['CFM text loss'] = epDiLoss_text / (diffusionLoader.dataset.__len__() // args.batch)
+        ret['CFM image loss'] = epDiLoss_image / (cfmLoader.dataset.__len__() // args.batch)
+        ret['CFM text loss'] = epDiLoss_text / (cfmLoader.dataset.__len__() // args.batch)
         if args.data == 'tiktok':
-            ret['CFM audio loss'] = epDiLoss_audio / (diffusionLoader.dataset.__len__() // args.batch)
+            ret['CFM audio loss'] = epDiLoss_audio / (cfmLoader.dataset.__len__() // args.batch)
         return ret
 
     def testEpoch(self):
@@ -439,7 +398,7 @@ if __name__ == '__main__':
     results = coach.run()
     
     import json
-    out_file = f"results_{args.model_type}_{args.data}.json"
+    out_file = f"results_cfm_optimized_{args.data}.json"
     with open(out_file, 'w') as f:
         json.dump(results, f)
     print(f"Results saved to {out_file}")
