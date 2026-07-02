@@ -108,11 +108,12 @@ class Model(nn.Module):
 
     def _get_cached_denoised(self, modal_name, feat):
         """Cache kết quả SVD denoising. Chỉ tính lần đầu mỗi epoch,
-        các lần gọi tiếp (forward_MM + forward_cl_MM) dùng lại cache."""
+        các lần gọi tiếp (forward_MM + forward_cl_MM) dùng lại cache.
+        Detach để tránh backward qua SVD graph 2 lần."""
         if not hasattr(self, '_spectral_cache'):
             self._spectral_cache = {}
         if modal_name not in self._spectral_cache:
-            self._spectral_cache[modal_name] = self.spectral_denoise(feat)
+            self._spectral_cache[modal_name] = self.spectral_denoise(feat).detach()
         return self._spectral_cache[modal_name]
 
     def clear_spectral_cache(self):
