@@ -68,6 +68,7 @@ def ParseArgs():
     parser.add_argument('--sampling_steps', type=int, default=0)
 
     parser.add_argument('--rebuild_k', type=int, default=1, help='top-k edges rebuilt per user/modal')
+    parser.add_argument('--rebuild_min_score', type=float, default=None, help='minimum raw CFM score required to keep a rebuilt edge')
     parser.add_argument('--cfm_residual_weight', type=float, default=0.2, help='lambda for residual graph: A_train + lambda * A_cfm')
     parser.add_argument('--e_loss', type=float, default=0.1, help='MSI loss weight')
     parser.add_argument('--ris_lambda', type=float, default=0.5, help='residual item semantic weight')
@@ -88,6 +89,8 @@ def ParseArgs():
         parser.error('--cfm_residual_weight must be non-negative')
     if parsed.rebuild_k <= 0:
         parser.error('--rebuild_k must be positive')
+    if parsed.rebuild_min_score is not None and parsed.rebuild_min_score < 0:
+        parser.error('--rebuild_min_score must be non-negative')
 
     model_type = _MODEL_ALIASES.get(parsed.model_type.lower())
     if model_type is None:

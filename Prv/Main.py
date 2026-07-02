@@ -60,6 +60,7 @@ class Coach:
         # Overfitting monitoring
         history = {
             'train_loss': [], 'train_bpr': [], 'train_cl': [],
+            'train_recall': [], 'train_ndcg': [], 'train_precision': [],
             'test_recall': [], 'test_ndcg': [], 'test_precision': [],
             'test_epochs': [],
         }
@@ -78,6 +79,13 @@ class Coach:
             history['train_cl'].append(reses['CL loss'])
 
             if tstFlag:
+                trnReses = self.trainEvalEpoch()
+                log(self.makePrint('TrainEval', ep, trnReses, tstFlag))
+
+                history['train_recall'].append(trnReses['Recall'])
+                history['train_ndcg'].append(trnReses['NDCG'])
+                history['train_precision'].append(trnReses['Precision'])
+
                 reses = self.testEpoch()
 
                 history['test_epochs'].append(ep)
@@ -94,8 +102,9 @@ class Coach:
                 else:
                     no_improve += 1
 
+                gap = trnReses['Recall'] - reses['Recall']
                 trend = 'NEW BEST' if no_improve == 0 else 'no improve %d/%d' % (no_improve, args.patience)
-                log(self.makePrint('Test', ep, reses, tstFlag) + '[%s]' % trend)
+                log(self.makePrint('Test', ep, reses, tstFlag) + '[%s] [gap=%.4f]' % (trend, gap))
             print()
 
             if args.patience > 0 and no_improve >= args.patience:
@@ -141,9 +150,23 @@ class Coach:
             log('Train Loss: %.4f (first) -> %.4f (last)' % (history['train_loss'][0], history['train_loss'][-1]))
             log('BPR Loss  : %.4f (first) -> %.4f (last)' % (history['train_bpr'][0], history['train_bpr'][-1]))
 
+        train_recall = history.get('train_recall', [])
+        if train_recall:
+            final_gap = train_recall[-1] - final_recall
+            best_gap = train_recall[best_idx] - best_recall
+            log('Train-Test gap: %.4f (at best) -> %.4f (final)' % (best_gap, final_gap))
+
         recall_drop_pct = (best_recall - final_recall) / best_recall * 100 if best_recall > 0 else 0
-        if recall_drop_pct > 5:
-            verdict = 'OVERFITTING - Recall dropped %.1f%% after peak' % recall_drop_pct
+        gap_increasing = False
+        if len(train_recall) >= 2:
+            early_gap = train_recall[0] - test_recall[0]
+            late_gap = train_recall[-1] - test_recall[-1]
+            gap_increasing = late_gap > early_gap * 1.5
+
+        if recall_drop_pct > 5 or (recall_drop_pct > 1 and gap_increasing):
+            verdict = 'OVERFITTING - Recall dropped %.1f%%' % recall_drop_pct
+            if gap_increasing:
+                verdict += ', train-test gap widening'
         elif recall_drop_pct > 1:
             verdict = 'MILD OVERFITTING - Recall dropped %.1f%% after peak' % recall_drop_pct
         elif bestEpoch >= total_trained - 1:
@@ -153,12 +176,18 @@ class Coach:
         log('VERDICT: %s' % verdict)
 
         log('')
-        log('%-8s %-12s %-12s %-12s' % ('Epoch', 'Recall', 'NDCG', 'Precision'))
-        log('-' * 46)
+        header = '%-8s %-14s %-14s %-14s %-14s %-14s %-14s %-8s' % (
+            'Epoch', 'Trn Recall', 'Tst Recall', 'Trn NDCG', 'Tst NDCG', 'Trn Prec', 'Tst Prec', 'Gap')
+        log(header)
+        log('-' * len(header))
         for i, ep in enumerate(test_epochs):
+            trn_r = train_recall[i] if i < len(train_recall) else 0
+            trn_n = history.get('train_ndcg', [0]*(i+1))[i] if i < len(history.get('train_ndcg', [])) else 0
+            trn_p = history.get('train_precision', [0]*(i+1))[i] if i < len(history.get('train_precision', [])) else 0
+            gap = trn_r - test_recall[i]
             marker = ' <-- BEST' if ep == bestEpoch else ''
-            log('%-8d %-12.4f %-12.4f %-12.4f%s' % (
-                ep, test_recall[i], test_ndcg[i], history['test_precision'][i], marker))
+            log('%-8d %-14.4f %-14.4f %-14.4f %-14.4f %-14.4f %-14.4f %-8.4f%s' % (
+                ep, trn_r, test_recall[i], trn_n, test_ndcg[i], trn_p, history['test_precision'][i], gap, marker))
         log('=' * 60)
 
     def prepareModel(self):
@@ -225,7 +254,9 @@ class Coach:
 
     def initRebuildStats(self):
         return {
+            'candidate_edges': 0,
             'generated_edges': 0,
+            'filtered_edges': 0,
             'train_overlap': 0,
             'top_score_sum': 0.0,
             'top_score_sq_sum': 0.0,
@@ -248,11 +279,17 @@ class Coach:
             if any(int(item) in test_items for item in hit_indices[row]):
                 stats['graph_hit'] += 1
 
-    def updateRebuildStats(self, stats, scores, batch_item, batch_index, top_scores, indices_, valid_edges):
+    def updateRebuildStats(self, stats, scores, batch_item, batch_index, top_scores, indices_, valid_edges, candidate_edges=None):
+        if candidate_edges is None:
+            candidate_edges = valid_edges
         selected_train_edges = batch_item.gather(1, indices_).bool() & valid_edges
         valid_scores = top_scores[valid_edges]
+        candidate_count = int(candidate_edges.sum().item())
+        generated_count = int(valid_edges.sum().item())
 
-        stats['generated_edges'] += int(valid_edges.sum().item())
+        stats['candidate_edges'] += candidate_count
+        stats['generated_edges'] += generated_count
+        stats['filtered_edges'] += candidate_count - generated_count
         stats['train_overlap'] += int(selected_train_edges.sum().item())
         stats['top_score_count'] += int(valid_scores.numel())
         if valid_scores.numel() > 0:
@@ -262,7 +299,9 @@ class Coach:
         self.updateGraphHitStats(stats, scores, batch_index)
 
     def formatRebuildStats(self, modal, stats):
+        candidate_edges = stats.get('candidate_edges', stats['generated_edges'])
         generated_edges = stats['generated_edges']
+        kept_ratio = generated_edges / candidate_edges if candidate_edges > 0 else 0.0
         train_overlap_ratio = stats['train_overlap'] / generated_edges if generated_edges > 0 else 0.0
         new_edge_ratio = 1.0 - train_overlap_ratio if generated_edges > 0 else 0.0
         score_count = stats['top_score_count']
@@ -272,13 +311,15 @@ class Coach:
         graph_hit = stats['graph_hit'] / stats['graph_hit_users'] if stats['graph_hit_users'] > 0 else 0.0
 
         return (
-            'Rebuild %s: rebuild_k = %d, generated_edges = %d, '
+            'Rebuild %s: rebuild_k = %d, candidate_edges = %d, generated_edges = %d, kept_ratio = %.6f, '
             'train_overlap_ratio = %.6f, new_edge_ratio = %.6f, '
             'top_score_mean = %.6f, top_score_std = %.6f, graph_hit@20 = %.6f'
             % (
                 modal,
                 args.rebuild_k,
+                candidate_edges,
                 generated_edges,
+                kept_ratio,
                 train_overlap_ratio,
                 new_edge_ratio,
                 top_score_mean,
@@ -294,11 +335,14 @@ class Coach:
 
         positive_scores = top_scores.clamp_min(0.0)
         edge_weights = positive_scores / (positive_scores + 1.0)
-        valid_edges = torch.isfinite(top_scores) & (edge_weights > 0)
+        candidate_edges = torch.isfinite(top_scores) & (edge_weights > 0)
+        valid_edges = candidate_edges
+        if args.rebuild_min_score is not None:
+            valid_edges = valid_edges & (top_scores >= args.rebuild_min_score)
         batch_users = batch_index.unsqueeze(1).expand_as(indices_)
 
         if stats is not None:
-            self.updateRebuildStats(stats, scores, batch_item, batch_index, top_scores, indices_, valid_edges)
+            self.updateRebuildStats(stats, scores, batch_item, batch_index, top_scores, indices_, valid_edges, candidate_edges)
 
         return (
             batch_users[valid_edges].cpu().numpy(),
@@ -603,6 +647,43 @@ class Coach:
         ret['CFM text loss'] = epDiLoss_text / cfm_steps
         if args.data == 'tiktok':
             ret['CFM audio loss'] = epDiLoss_audio / cfm_steps
+        return ret
+
+    def trainEvalEpoch(self, sample_size=1024):
+        self.model.eval()
+        with torch.no_grad():
+            if args.data == 'tiktok':
+                usrEmbeds, itmEmbeds = self.model.forward_MM(self.handler.torchBiAdj, self.image_UI_matrix, self.text_UI_matrix, self.audio_UI_matrix)
+            else:
+                usrEmbeds, itmEmbeds = self.model.forward_MM(self.handler.torchBiAdj, self.image_UI_matrix, self.text_UI_matrix)
+
+            trnMat = self.handler.trnMat.tocsr()
+            active_users = np.array([u for u in range(args.user) if trnMat[u].nnz > 0])
+            sample_size = min(sample_size, len(active_users))
+            sampled = np.random.choice(active_users, sample_size, replace=False)
+
+            trnLocs = [None] * args.user
+            for u in sampled:
+                trnLocs[u] = list(trnMat[u].indices)
+
+            epRecall = epNdcg = epPrecision = 0
+            batch_size = args.tstBat
+            for start in range(0, len(sampled), batch_size):
+                batch_users = sampled[start:start + batch_size]
+                usr = torch.LongTensor(batch_users).to(device)
+                allPreds = torch.mm(usrEmbeds[usr], torch.transpose(itmEmbeds, 1, 0))
+                _, topLocs = torch.topk(allPreds, args.topk)
+                recall, ndcg, precision = self.calcRes(
+                    topLocs.cpu().numpy(), trnLocs, batch_users)
+                epRecall += recall
+                epNdcg += ndcg
+                epPrecision += precision
+
+            ret = dict()
+            ret['Recall'] = epRecall / sample_size
+            ret['NDCG'] = epNdcg / sample_size
+            ret['Precision'] = epPrecision / sample_size
+        self.model.train()
         return ret
 
     def testEpoch(self):
