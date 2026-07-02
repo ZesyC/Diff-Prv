@@ -385,7 +385,7 @@ class Coach:
                     all_scores = anc_emb_det @ itm_emb_det.T  # (B, num_items)
                     # Mask interacted items → -inf
                     trn_mask_batch = torch.tensor(
-                        self.handler.trnMat[ancs.cpu().numpy()].toarray(),
+                        self.handler.trnMat.tocsr()[ancs.cpu().numpy()].toarray(),
                         device=device, dtype=torch.bool
                     )
                     all_scores[trn_mask_batch] = -float('inf')
