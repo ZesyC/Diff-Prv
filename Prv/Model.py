@@ -93,14 +93,31 @@ class Model(nn.Module):
         return audio_feats
 
     def spectral_denoise(self, feat, topk=None):
-        """SVD-based denoising: giữ top-k singular values, zero-out phần còn lại."""
+        """SVD-based denoising: giữ top-k singular values, zero-out phần còn lại.
+        
+        FIX Bug 2: Dùng broadcast thay vì torch.diag để tránh shape mismatch.
+        full_matrices=False → U:[N,k], S:[k], Vh:[k,D]
+        Tính: (U[:,:k] * S[:k]) @ Vh[:k,:] thay vì U @ diag(S) @ Vh
+        """
         if topk is None:
             topk = args.spectral_topk
         U, S, Vh = torch.linalg.svd(feat, full_matrices=False)
         k = min(topk, S.shape[0])
-        S_filtered = S.clone()
-        S_filtered[k:] = 0.0
-        return U @ torch.diag(S_filtered) @ Vh
+        # U[:, :k] * S[:k].unsqueeze(0) → [N, k], rồi @ Vh[:k, :] → [N, D]
+        return (U[:, :k] * S[:k].unsqueeze(0)) @ Vh[:k, :]
+
+    def _get_cached_denoised(self, modal_name, feat):
+        """Cache kết quả SVD denoising. Chỉ tính lần đầu mỗi epoch,
+        các lần gọi tiếp (forward_MM + forward_cl_MM) dùng lại cache."""
+        if not hasattr(self, '_spectral_cache'):
+            self._spectral_cache = {}
+        if modal_name not in self._spectral_cache:
+            self._spectral_cache[modal_name] = self.spectral_denoise(feat)
+        return self._spectral_cache[modal_name]
+
+    def clear_spectral_cache(self):
+        """Xóa cache SVD. Gọi ở đầu mỗi epoch."""
+        self._spectral_cache = {}
 
     def forward_MM(self, adj, image_adj, text_adj, audio_adj=None):
         if args.trans == 0:
@@ -119,12 +136,12 @@ class Model(nn.Module):
             else:
                 audio_feats = self.audio_trans(self.audio_embedding)
 
-        # === Improvement B: Spectral Denoising ===
+        # === Improvement B: Spectral Denoising (dùng cache, chỉ tính 1 lần/epoch) ===
         if args.spectral_denoise:
-            image_feats = self.spectral_denoise(image_feats)
-            text_feats = self.spectral_denoise(text_feats)
+            image_feats = self._get_cached_denoised('image', image_feats)
+            text_feats = self._get_cached_denoised('text', text_feats)
             if audio_adj is not None:
-                audio_feats = self.spectral_denoise(audio_feats)
+                audio_feats = self._get_cached_denoised('audio', audio_feats)
 
         embedsImageAdj = torch.concat([self.uEmbeds, self.iEmbeds])
         embedsImageAdj = torch.spmm(image_adj, embedsImageAdj)
@@ -206,12 +223,12 @@ class Model(nn.Module):
             else:
                 audio_feats = self.audio_trans(self.audio_embedding)
 
-        # === Improvement B: Spectral Denoising ===
+        # === Improvement B: Spectral Denoising (dùng cache, chỉ tính 1 lần/epoch) ===
         if args.spectral_denoise:
-            image_feats = self.spectral_denoise(image_feats)
-            text_feats = self.spectral_denoise(text_feats)
+            image_feats = self._get_cached_denoised('image', image_feats)
+            text_feats = self._get_cached_denoised('text', text_feats)
             if audio_adj is not None:
-                audio_feats = self.spectral_denoise(audio_feats)
+                audio_feats = self._get_cached_denoised('audio', audio_feats)
 
         embedsImage = torch.concat([self.uEmbeds, F.normalize(image_feats)])
         embedsImage = torch.spmm(image_adj, embedsImage)

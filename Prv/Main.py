@@ -125,6 +125,7 @@ class Coach:
 
     def trainEpoch(self):
         self.model.train()
+        self.model.clear_spectral_cache()  # Reset SVD cache mỗi epoch
         self.velocity_model_image.train()
         self.velocity_model_text.train()
         if args.data == 'tiktok':
@@ -331,23 +332,33 @@ class Coach:
                 euler_audio = self.buildUIMatrix(u_list_audio, i_list_audio, edge_list_audio)
 
             # === Improvement A: Momentum Graph Update (EMA blend) ===
+            # FIX Bug 1: Convert sparse→dense để blend, tránh double-counting
+            # khi 2 sparse tensor có sparsity pattern khác nhau.
             m = args.ui_momentum
             if m > 0 and self.prev_image_UI is not None:
-                self.image_UI_matrix = ((1 - m) * euler_image + m * self.prev_image_UI).coalesce()
-                self.text_UI_matrix = ((1 - m) * euler_text + m * self.prev_text_UI).coalesce()
+                def sparse_ema(new_sp, old_sp, momentum):
+                    new_d = new_sp.to_dense()
+                    old_d = old_sp.to_dense()
+                    blended = (1 - momentum) * new_d + momentum * old_d
+                    row_sum = blended.sum(dim=1, keepdim=True).clamp(min=1e-8)
+                    blended = blended / row_sum
+                    return blended.to_sparse()
+
+                self.image_UI_matrix = sparse_ema(euler_image, self.prev_image_UI, m)
+                self.text_UI_matrix  = sparse_ema(euler_text,  self.prev_text_UI,  m)
                 if args.data == 'tiktok':
-                    self.audio_UI_matrix = ((1 - m) * euler_audio + m * self.prev_audio_UI).coalesce()
+                    self.audio_UI_matrix = sparse_ema(euler_audio, self.prev_audio_UI, m)
             else:
                 self.image_UI_matrix = euler_image
                 self.text_UI_matrix = euler_text
                 if args.data == 'tiktok':
                     self.audio_UI_matrix = euler_audio
 
-            # Lưu bản pre-dropout cho momentum epoch tiếp
-            self.prev_image_UI = euler_image.clone()
-            self.prev_text_UI = euler_text.clone()
+            # Lưu euler (trước dropout) cho momentum epoch tiếp
+            self.prev_image_UI = euler_image
+            self.prev_text_UI  = euler_text
             if args.data == 'tiktok':
-                self.prev_audio_UI = euler_audio.clone()
+                self.prev_audio_UI = euler_audio
 
             # Edge dropout
             self.image_UI_matrix = self.model.edgeDropper(self.image_UI_matrix)
@@ -378,20 +389,26 @@ class Coach:
             posEmbeds = itmEmbeds[poss]
 
             # === Improvement C: Hard Negative Mining ===
+            # FIX Bug 3: Dùng toàn bộ itmEmbeds (full item set, shape [num_items, latdim])
+            # và detach riêng để tính score [B, num_items] thay vì [B, B].
             if args.hard_neg:
                 with torch.no_grad():
-                    anc_emb_det = ancEmbeds.detach()
-                    itm_emb_det = itmEmbeds.detach()
-                    all_scores = anc_emb_det @ itm_emb_det.T  # (B, num_items)
-                    # Mask interacted items → -inf
+                    all_item_emb = itmEmbeds.detach()  # [num_items, latdim]
+                    anc_det = ancEmbeds.detach()        # [B, latdim]
+
+                    # Score đúng: [B, num_items]
+                    all_scores = anc_det @ all_item_emb.T  # [B, num_items]
+
+                    # Mask positive/interacted items → -inf
                     trn_mask_batch = torch.tensor(
                         self.handler.trnMat.tocsr()[ancs.cpu().numpy()].toarray(),
                         device=device, dtype=torch.bool
-                    )
-                    all_scores[trn_mask_batch] = -float('inf')
+                    )  # [B, num_items]
+                    all_scores.masked_fill_(trn_mask_batch, -float('inf'))
+
                     # Top-K hard negative candidates
                     K = min(args.hard_neg_pool, args.item)
-                    _, hard_candidates = torch.topk(all_scores, k=K, dim=-1)  # (B, K)
+                    _, hard_candidates = torch.topk(all_scores, k=K, dim=-1)  # [B, K]
                     # Random chọn 1 trong K
                     rand_idx = torch.randint(K, (ancs.shape[0],), device=device)
                     hard_negs = hard_candidates[torch.arange(ancs.shape[0], device=device), rand_idx]
