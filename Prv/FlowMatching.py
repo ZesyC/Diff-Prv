@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class GraphFlowMatching(nn.Module):
     def __init__(self, sigma_min=1e-4):
@@ -46,6 +47,7 @@ class GraphFlowMatching(nn.Module):
             cfm_loss = cfm_loss_pos
         
         alpha_hat = self.estimate_alpha_0(psi_t, v_pred, t)
+        model_feats = F.normalize(model_feats, dim=-1)
         usr_model_embeds = torch.mm(alpha_hat, model_feats)
         usr_id_embeds = torch.mm(alpha_0, itmEmbeds)
         msi_loss = torch.mean((usr_model_embeds - usr_id_embeds) ** 2, dim=list(range(1, len(usr_model_embeds.shape))))
